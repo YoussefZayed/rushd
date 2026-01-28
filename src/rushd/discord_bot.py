@@ -72,6 +72,10 @@ class RushdDiscordBot(discord.Client):
         self.seen_entries: set[str] = set()
         self.last_status: str = "unknown"
         self._clearing: bool = False  # Flag to pause monitor during /clear
+        self._awaiting_plan_approval: bool = False  # Flag when ExitPlanMode was called
+
+    # Keywords that indicate plan approval (case-insensitive)
+    APPROVAL_KEYWORDS = {"yes", "y", "approve", "ok", "proceed", "lgtm", "looks good", "go ahead", "approved"}
 
     def _get_channel_name(self, suffix: str) -> str:
         """Generate channel name using primary instance name."""
@@ -282,6 +286,10 @@ class RushdDiscordBot(discord.Client):
                 new_status = activity_state.status
                 if new_status != self.last_status:
                     print(f"[Monitor] Status changed: {self.last_status} -> {new_status}", flush=True)
+                    # Reset plan approval flag when Claude starts working
+                    if new_status in ("thinking", "tool_use", "running") and self._awaiting_plan_approval:
+                        self._awaiting_plan_approval = False
+                        print(f"[Discord] Plan approved, Claude is working", flush=True)
                     await self.send_status_update(new_status, activity_state)
                     self.last_status = new_status
 
@@ -319,6 +327,8 @@ class RushdDiscordBot(discord.Client):
                 # Special handling for tools that need user input
                 if entry.tool_name == "ExitPlanMode":
                     await self._notify_plan_approval_needed()
+                    self._awaiting_plan_approval = True
+                    print(f"[Discord] Now awaiting plan approval", flush=True)
                 elif entry.tool_name == "AskUserQuestion":
                     await self._notify_question_asked(entry.tool_input)
             if entry.tool_result:
@@ -430,12 +440,24 @@ class RushdDiscordBot(discord.Client):
 
         print(f"[Discord] Received command from {message.author.name}: {message.content[:50]}...", flush=True)
 
+        content = message.content.strip()
+
         # Handle /clear command - destroy and recreate primary instance
-        if message.content.strip().lower() == "/clear":
+        if content.lower() == "/clear":
             await self._handle_clear_command(message)
             return
 
-        success = self.manager.send_message(self.primary_name, message.content)
+        # If awaiting plan approval, distinguish approval from feedback
+        if self._awaiting_plan_approval:
+            if content.lower() in self.APPROVAL_KEYWORDS:
+                # Approval - send as-is
+                print(f"[Discord] Detected plan approval keyword: {content}", flush=True)
+            else:
+                # Feedback - prefix to make intent clear to Claude
+                content = f"User wants to modify the plan: {content}"
+                print(f"[Discord] Detected plan feedback, prefixing message", flush=True)
+
+        success = self.manager.send_message(self.primary_name, content)
 
         if success:
             await message.add_reaction("✅")
