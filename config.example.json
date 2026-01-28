@@ -8,5 +8,17 @@
   },
   "defaults": {
     "session_name": "rushd-instances"
+  },
+  "discord": {
+    "enabled": false,
+    "guild_id": null,
+    "channels": {
+      "activity": null,
+      "responses": null,
+      "status": null,
+      "commands": null
+    },
+    "allowed_users": [],
+    "poll_interval": 2.0
   }
 }

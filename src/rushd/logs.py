@@ -133,7 +133,7 @@ class ClaudeLogReader:
 
                         # Also check toolUseResult for more details
                         tool_result = data.get("toolUseResult", {})
-                        if tool_result:
+                        if tool_result and isinstance(tool_result, dict):
                             stdout = tool_result.get("stdout", "")
                             stderr = tool_result.get("stderr", "")
                             if stderr:

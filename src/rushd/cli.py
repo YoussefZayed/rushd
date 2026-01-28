@@ -408,6 +408,40 @@ class RushdCLI:
         import json as json_lib
         console.print(json_lib.dumps(config.model_dump(mode="json"), indent=2, default=str))
 
+    def discord(self) -> None:
+        """Start the Discord bot bridge for the primary instance."""
+        import os
+
+        config = self._config.load()
+        if not config.discord.enabled:
+            console.print("[red]Error:[/red] Discord not enabled in config")
+            console.print("[dim]Set discord.enabled = true in ~/.rushd/config.json[/dim]")
+            return
+
+        token = os.environ.get("RUSHD_DISCORD_TOKEN")
+        if not token:
+            console.print("[red]Error:[/red] RUSHD_DISCORD_TOKEN environment variable not set")
+            return
+
+        if not config.discord.guild_id:
+            console.print("[red]Error:[/red] discord.guild_id not set in config")
+            console.print("[dim]Right-click your server → Copy Server ID[/dim]")
+            return
+
+        if not config.discord.allowed_users:
+            console.print("[yellow]Warning:[/yellow] No allowed_users configured")
+            console.print("[dim]Add your Discord username to discord.allowed_users[/dim]")
+
+        primary_name = config.primary.name
+        if not self.manager.is_primary_running(primary_name):
+            console.print("[yellow]Warning:[/yellow] Primary instance not running")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
+
+        from .discord_bot import run_discord_bot
+        console.print(f"[green]Starting Discord bot for '{primary_name}'...[/green]")
+        console.print("[dim]Channels will be auto-created if needed[/dim]")
+        run_discord_bot(self.manager, config.discord, self._config, primary_name, token)
+
 
 def main():
     """Main entry point."""

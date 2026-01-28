@@ -27,12 +27,32 @@ class DefaultsConfig(BaseModel):
     )
 
 
+class DiscordChannels(BaseModel):
+    """Discord channel IDs for each purpose."""
+
+    activity: Optional[int] = Field(default=None, description="Activity stream channel")
+    responses: Optional[int] = Field(default=None, description="Responses only channel")
+    status: Optional[int] = Field(default=None, description="Status notifications channel")
+    commands: Optional[int] = Field(default=None, description="Commands input channel")
+
+
+class DiscordConfig(BaseModel):
+    """Discord bot configuration."""
+
+    enabled: bool = Field(default=False, description="Enable Discord bot")
+    guild_id: Optional[int] = Field(default=None, description="Discord server ID")
+    channels: DiscordChannels = Field(default_factory=DiscordChannels)
+    allowed_users: list[str] = Field(default_factory=list, description="Discord usernames allowed to send commands")
+    poll_interval: float = Field(default=2.0, description="Seconds between activity checks")
+
+
 class RushdConfig(BaseModel):
     """Root configuration model."""
 
     version: str = "1.0"
     primary: PrimaryConfig = Field(default_factory=PrimaryConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
+    discord: DiscordConfig = Field(default_factory=DiscordConfig)
 
 
 class ConfigManager:

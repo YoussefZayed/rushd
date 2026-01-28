@@ -350,8 +350,10 @@ rushd/
     ├── manager.py          # ClaudeInstanceManager - main orchestration
     ├── models.py           # Pydantic data models
     ├── store.py            # JSON persistence (~/.rushd/instances.json)
+    ├── config.py           # Configuration management (~/.rushd/config.json)
     ├── tmux.py             # TmuxController - tmux subprocess wrapper
-    └── logs.py             # ClaudeLogReader - parse Claude Code logs
+    ├── logs.py             # ClaudeLogReader - parse Claude Code logs
+    └── discord_bot.py      # Discord bot integration
 ```
 
 ### How It Works
@@ -540,11 +542,106 @@ uv tool install -e . --force
 - **[pydantic](https://docs.pydantic.dev/)** - Data validation and serialization
 - **[rich](https://rich.readthedocs.io/)** - Terminal formatting and tables
 - **[textual](https://textual.textualize.io/)** - TUI framework
+- **[discord.py](https://discordpy.readthedocs.io/)** - Discord bot framework
+
+---
+
+## Discord Integration
+
+rushd can bridge your primary instance with Discord, allowing you to monitor Claude's activity and send commands from Discord.
+
+### Setup
+
+1. **Create a Discord Bot** at [Discord Developer Portal](https://discord.com/developers/applications):
+   - Create a new application
+   - Go to Bot tab → Enable "Message Content Intent"
+   - Copy the bot token
+
+2. **Invite the bot** to your server:
+   - OAuth2 → URL Generator
+   - Scopes: `bot`
+   - Permissions: `Manage Channels`, `Send Messages`, `Read Message History`, `View Channels`, `Add Reactions`
+   - Use the generated URL to add bot to your server
+
+3. **Configure rushd** (`~/.rushd/config.json`):
+   ```json
+   {
+     "discord": {
+       "enabled": true,
+       "guild_id": 123456789012345678,
+       "allowed_users": ["your-discord-username"],
+       "poll_interval": 2.0
+     }
+   }
+   ```
+
+4. **Set the token** (add to `~/.bashrc`):
+   ```bash
+   export RUSHD_DISCORD_TOKEN="your-bot-token"
+   ```
+
+5. **Start the bot**:
+   ```bash
+   rushd discord
+   ```
+
+### Discord Channels
+
+The bot automatically creates a category and channels using the primary instance name:
+
+| Channel | Purpose |
+|---------|---------|
+| `#primary-activity` | Full activity stream (thinking, tools, results) |
+| `#primary-responses` | Claude's text responses only |
+| `#primary-status` | Status notifications (thinking, idle, working) |
+| `#primary-commands` | Send commands to Claude here |
+
+### Discord Commands
+
+| Command | Description |
+|---------|-------------|
+| Any message | Sent to Claude as input |
+| `/clear` | Destroy and recreate the primary instance |
+
+Messages can be sent from both `#primary-commands` and `#primary-responses` channels.
+
+### Running as a Service
+
+For persistent operation, create a systemd service:
+
+```ini
+# /etc/systemd/system/rushd-discord.service
+[Unit]
+Description=rushd Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-username
+WorkingDirectory=/home/your-username
+Environment="RUSHD_DISCORD_TOKEN=your-token"
+Environment="PATH=/home/your-username/.local/bin:/usr/bin:/bin"
+ExecStart=/home/your-username/.local/bin/rushd discord
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/rushd-discord.log
+StandardError=append:/var/log/rushd-discord.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable rushd-discord
+sudo systemctl start rushd-discord
+```
 
 ---
 
 ## Version History
 
+- **v0.4.0** - Added Discord bot integration with multi-channel support, /clear command
 - **v0.3.0** - Added primary instance support, user configuration (~/.rushd/config.json), commands default to primary instance
 - **v0.2.0** - Added conversation log integration, structured activity display, auto-approve mode, display mode toggle
 - **v0.1.1** - Bug fixes for numeric message handling

@@ -261,12 +261,14 @@ class ClaudeInstanceManager:
         """Refresh the status of all instances based on tmux state and activity."""
         instances = self.store.list_all(include_stopped=True)
         for instance in instances:
-            if instance.status == InstanceStatus.STOPPED:
-                continue
-            if not self.tmux.window_exists(instance.tmux_window):
-                self.store.update(instance.id, status=InstanceStatus.STOPPED)
+            window_exists = self.tmux.window_exists(instance.tmux_window)
+
+            if not window_exists:
+                # Window gone - mark as stopped
+                if instance.status != InstanceStatus.STOPPED:
+                    self.store.update(instance.id, status=InstanceStatus.STOPPED)
             else:
-                # Detect activity state from logs
+                # Window exists - detect activity state from logs
                 activity = self.get_activity_state(instance.id)
                 status_map = {
                     "thinking": InstanceStatus.THINKING,

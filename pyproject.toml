@@ -1,6 +1,6 @@
 [project]
 name = "rushd"
-version = "0.3.0"
+version = "0.4.0"
 description = "Manage multiple Claude Code instances via tmux"
 requires-python = ">=3.11"
 dependencies = [
@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "rich>=13.0.0",
     "textual>=0.50.0",
+    "discord.py>=2.3.0",
 ]
 
 [project.scripts]
