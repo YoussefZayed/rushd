@@ -177,9 +177,23 @@ class TmuxController:
 
         return False
 
-    def attach_session(self) -> None:
-        """Attach to the managed session (blocking, hands off to tmux)."""
-        subprocess.run(["tmux", "attach-session", "-t", self.session_name])
+    def attach_session(self, window_target: Optional[str] = None) -> None:
+        """Attach to the managed session (blocking, hands off to tmux).
+
+        If already inside tmux, uses switch-client instead of attach-session.
+        """
+        import os
+
+        # Select the specific window first if provided
+        if window_target:
+            self.select_window(window_target)
+
+        if os.environ.get("TMUX"):
+            # Already inside tmux - use switch-client
+            subprocess.run(["tmux", "switch-client", "-t", self.session_name])
+        else:
+            # Not in tmux - use attach-session
+            subprocess.run(["tmux", "attach-session", "-t", self.session_name])
 
     def select_window(self, window_target: str) -> bool:
         """Select (focus) a specific window."""

@@ -2,8 +2,18 @@
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+
+
+@dataclass
+class ActivityState:
+    """Current activity state derived from log analysis."""
+
+    status: Literal["thinking", "tool_use", "running", "idle", "unknown"]
+    tool_name: Optional[str] = None
+    seconds_since_activity: float = 0.0
 
 
 @dataclass
@@ -155,6 +165,68 @@ class ClaudeLogReader:
                         entry.text_response = item.get("text", "")[:500]
 
         return entry
+
+    def detect_activity_state(self, idle_threshold_seconds: float = 5.0) -> ActivityState:
+        """
+        Detect the current activity state from the most recent log entries.
+
+        Args:
+            idle_threshold_seconds: Time after which to consider instance idle
+
+        Returns:
+            ActivityState with detected status and metadata
+        """
+        entries = self.read_entries(last_n=5)
+
+        if not entries:
+            return ActivityState(status="unknown")
+
+        # Get the most recent entry
+        latest = entries[-1]
+
+        # Parse timestamp to determine age
+        try:
+            # Handle ISO format with Z suffix
+            ts = latest.timestamp.replace("Z", "+00:00")
+            entry_time = datetime.fromisoformat(ts)
+            now = datetime.now(timezone.utc)
+            seconds_ago = (now - entry_time).total_seconds()
+        except (ValueError, AttributeError):
+            seconds_ago = 0.0
+
+        # If activity is stale, instance is idle
+        if seconds_ago >= idle_threshold_seconds:
+            return ActivityState(
+                status="idle",
+                seconds_since_activity=seconds_ago,
+            )
+
+        # Recent activity - determine specific state
+        if latest.thinking:
+            return ActivityState(
+                status="thinking",
+                seconds_since_activity=seconds_ago,
+            )
+
+        if latest.tool_name:
+            return ActivityState(
+                status="tool_use",
+                tool_name=latest.tool_name,
+                seconds_since_activity=seconds_ago,
+            )
+
+        if latest.tool_result is not None:
+            # Just received tool result, still processing
+            return ActivityState(
+                status="tool_use",
+                seconds_since_activity=seconds_ago,
+            )
+
+        # Default to running if recent activity but no specific state
+        return ActivityState(
+            status="running",
+            seconds_since_activity=seconds_ago,
+        )
 
 
 def format_entry(entry: LogEntry) -> Optional[str]:

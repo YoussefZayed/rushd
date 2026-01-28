@@ -1,6 +1,6 @@
 [project]
 name = "rushd"
-version = "0.2.0"
+version = "0.3.0"
 description = "Manage multiple Claude Code instances via tmux"
 requires-python = ">=3.11"
 dependencies = [

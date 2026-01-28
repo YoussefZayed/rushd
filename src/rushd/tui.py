@@ -10,8 +10,20 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Footer, Header, Input, Static, RichLog
 
+from .config import ConfigManager
 from .manager import ClaudeInstanceManager
 from .models import InstanceStatus, DisplayMode
+
+# Status indicators for TUI tabs
+STATUS_INDICATORS = {
+    InstanceStatus.STARTING: ("...", "yellow"),
+    InstanceStatus.RUNNING: ("", "green"),
+    InstanceStatus.THINKING: ("*", "cyan"),
+    InstanceStatus.TOOL_USE: ("~", "magenta"),
+    InstanceStatus.IDLE: ("", "dim"),
+    InstanceStatus.STOPPED: ("X", "red"),
+    InstanceStatus.ERROR: ("!", "red"),
+}
 
 
 class InstanceTabs(Static):
@@ -27,7 +39,7 @@ class InstanceTabs(Static):
         yield Horizontal(id="tabs-container")
 
     def refresh_tabs(self, selected_id: Optional[str] = None, display_mode: DisplayMode = DisplayMode.ACTIVITY) -> None:
-        """Refresh the tabs display."""
+        """Refresh the tabs display with status indicators."""
         self.selected_id = selected_id
         self.display_mode = display_mode
         instances = self.manager.list_instances()
@@ -42,12 +54,22 @@ class InstanceTabs(Static):
                 name = inst.name or inst.id[:8]
                 is_selected = inst.id == selected_id
 
+                # Get status indicator
+                indicator_char, indicator_style = STATUS_INDICATORS.get(
+                    inst.status, ("", "white")
+                )
+
                 if is_selected:
                     tabs_text.append(f"[{i}] ", style="cyan")
-                    tabs_text.append(f"{name}*", style="cyan bold")
+                    tabs_text.append(name, style="cyan bold")
+                    if indicator_char:
+                        tabs_text.append(indicator_char, style=indicator_style)
+                    tabs_text.append("*", style="cyan bold")  # Selection marker
                 else:
                     tabs_text.append(f"[{i}] ", style="dim")
                     tabs_text.append(name, style="white")
+                    if indicator_char:
+                        tabs_text.append(indicator_char, style=indicator_style)
                 tabs_text.append("  ")
 
         tabs_text.append("[+] New", style="green")
@@ -109,8 +131,11 @@ class RushdApp(App):
         Binding("escape", "clear_input", "Clear"),
     ]
 
-    def __init__(self, session_name: str = "rushd-instances"):
+    def __init__(self, session_name: Optional[str] = None):
         super().__init__()
+        self._config = ConfigManager()
+        config = self._config.load()
+        session_name = session_name or config.defaults.session_name
         self.manager = ClaudeInstanceManager(session_name)
         self.selected_instance: Optional[str] = None
         self._output_widget: Optional[OutputDisplay] = None
@@ -158,6 +183,10 @@ class RushdApp(App):
 
     def _poll_output(self) -> None:
         """Poll and update output from selected instance."""
+        # Refresh activity statuses on each poll
+        self.manager.refresh_statuses()
+        self._refresh_tabs()
+
         if not self.selected_instance or not self._output_widget:
             return
 
@@ -283,6 +312,13 @@ class RushdApp(App):
                     name = parts[i]
                 i += 1
 
+        # If no name/dir provided, use primary config defaults
+        if name is None and working_dir is None:
+            primary = self._config.get_primary()
+            name = primary.name
+            working_dir = primary.working_dir
+            self._set_status(f"Creating primary instance ({name})...")
+
         try:
             instance = self.manager.start_instance(name=name, working_dir=working_dir)
             self.selected_instance = instance.id
@@ -320,6 +356,7 @@ class RushdApp(App):
 
     def _list_instances(self) -> None:
         """Show list of instances in output."""
+        self.manager.refresh_statuses()
         instances = self.manager.list_instances(include_stopped=True)
         if not instances:
             self._set_status("No instances. Type /new to create one.")
@@ -330,16 +367,18 @@ class RushdApp(App):
             self._output_widget.write("[bold]Instances:[/bold]\n")
             for i, inst in enumerate(instances, 1):
                 name = inst.name or inst.id[:8]
-                status_icon = {
+                status_display = {
                     InstanceStatus.RUNNING: "[green]running[/green]",
-                    InstanceStatus.STARTING: "[yellow]starting[/yellow]",
+                    InstanceStatus.STARTING: "[yellow]starting...[/yellow]",
+                    InstanceStatus.THINKING: "[cyan]thinking*[/cyan]",
+                    InstanceStatus.TOOL_USE: "[magenta]tool~[/magenta]",
                     InstanceStatus.IDLE: "[blue]idle[/blue]",
                     InstanceStatus.STOPPED: "[red]stopped[/red]",
-                    InstanceStatus.ERROR: "[red]error[/red]",
-                }.get(inst.status, inst.status)
+                    InstanceStatus.ERROR: "[red]error![/red]",
+                }.get(inst.status, str(inst.status))
                 selected = "*" if inst.id == self.selected_instance else " "
                 self._output_widget.write(
-                    f"  {selected}[{i}] {name} - {status_icon} - {inst.working_dir}\n"
+                    f"  {selected}[{i}] {name} - {status_display} - {inst.working_dir}\n"
                 )
 
     def _attach_instance(self) -> None:
@@ -414,7 +453,7 @@ class RushdApp(App):
         self.exit()
 
 
-def run_tui(session_name: str = "rushd-instances") -> Optional[str]:
+def run_tui(session_name: Optional[str] = None) -> Optional[str]:
     """Run the TUI and return the result (e.g., 'attach' if user wants to attach)."""
     app = RushdApp(session_name)
     return app.run()

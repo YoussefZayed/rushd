@@ -431,6 +431,66 @@ rushd --session my-session start -n test
 rushd --session my-session list
 ```
 
+### Primary Instance
+
+rushd supports a "primary" instance that serves as the default target for commands when no instance is specified.
+
+**Setup:**
+```bash
+# Initialize config with defaults
+rushd config --init
+
+# Or copy the example
+cp config.example.json ~/.rushd/config.json
+```
+
+**Configuration (~/.rushd/config.json):**
+```json
+{
+  "version": "1.0",
+  "primary": {
+    "name": "primary",
+    "working_dir": "/home/admin/control-center",
+    "model": null,
+    "auto_approve": true
+  },
+  "defaults": {
+    "session_name": "rushd-instances"
+  }
+}
+```
+
+**Usage:**
+```bash
+# Start primary instance (uses config defaults)
+rushd start
+
+# Send to primary (no instance argument needed)
+rushd send "hello world"
+
+# View primary output
+rushd view
+
+# Explicitly start with different settings
+rushd start -n other -d ~/other-project
+```
+
+**Config Fields:**
+| Field | Description |
+|-------|-------------|
+| `primary.name` | Name for the primary instance (default: "primary") |
+| `primary.working_dir` | Default working directory for primary |
+| `primary.model` | Default Claude model (null = use Claude default) |
+| `primary.auto_approve` | Whether to skip permission prompts (default: true) |
+| `defaults.session_name` | Tmux session name for all instances |
+
+**View/Edit Config:**
+```bash
+rushd config           # Display current config
+rushd config --show    # Same as above
+rushd config --init    # Create config with defaults
+```
+
 ---
 
 ## Troubleshooting
@@ -485,6 +545,7 @@ uv tool install -e . --force
 
 ## Version History
 
+- **v0.3.0** - Added primary instance support, user configuration (~/.rushd/config.json), commands default to primary instance
 - **v0.2.0** - Added conversation log integration, structured activity display, auto-approve mode, display mode toggle
 - **v0.1.1** - Bug fixes for numeric message handling
 - **v0.1.0** - Initial release with basic instance lifecycle and TUI

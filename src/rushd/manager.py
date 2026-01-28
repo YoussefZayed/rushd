@@ -8,7 +8,7 @@ from typing import Optional
 from .models import InstanceMetadata, InstanceStatus, DisplayMode
 from .store import InstanceStore
 from .tmux import TmuxController
-from .logs import ClaudeLogReader, LogEntry, format_activity
+from .logs import ClaudeLogReader, LogEntry, format_activity, ActivityState
 
 
 class ClaudeInstanceManager:
@@ -184,6 +184,19 @@ class ClaudeInstanceManager:
         """Get an instance by ID or name."""
         return self.store.find_by_name_or_id(identifier)
 
+    def get_primary_instance(self, primary_name: str = "primary") -> Optional[InstanceMetadata]:
+        """Get the primary instance if it exists."""
+        return self.store.find_by_name_or_id(primary_name)
+
+    def is_primary_running(self, primary_name: str = "primary") -> bool:
+        """Check if the primary instance exists and is running."""
+        inst = self.get_primary_instance(primary_name)
+        if not inst:
+            return False
+        if inst.status == InstanceStatus.STOPPED:
+            return False
+        return self.tmux.window_exists(inst.tmux_window)
+
     def send_message(self, identifier: str, message: str) -> bool:
         """Send a message to an instance."""
         instance = self.store.find_by_name_or_id(identifier)
@@ -208,15 +221,14 @@ class ClaudeInstanceManager:
         Attach to an instance's tmux window.
 
         This hands control to tmux and blocks until detached.
+        If already inside tmux, uses switch-client instead of attach-session.
         """
         instance = self.store.find_by_name_or_id(identifier)
         if not instance:
             return False
 
-        # Select the window first
-        self.tmux.select_window(instance.tmux_window)
-        # Then attach to the session
-        self.tmux.attach_session()
+        # Attach to the session, selecting the window
+        self.tmux.attach_session(window_target=instance.tmux_window)
         return True
 
     def cleanup(self, force: bool = False) -> None:
@@ -225,8 +237,28 @@ class ClaudeInstanceManager:
         self.tmux.cleanup_session()
         self.store.clear_all()
 
+    def get_activity_state(self, identifier: str) -> ActivityState:
+        """
+        Get the current activity state of an instance.
+
+        Args:
+            identifier: Instance ID or name
+
+        Returns:
+            ActivityState with current status
+        """
+        instance = self.store.find_by_name_or_id(identifier)
+        if not instance:
+            return ActivityState(status="unknown")
+
+        if not self.tmux.window_exists(instance.tmux_window):
+            return ActivityState(status="unknown")
+
+        log_reader = ClaudeLogReader(instance.working_dir)
+        return log_reader.detect_activity_state()
+
     def refresh_statuses(self) -> None:
-        """Refresh the status of all instances based on tmux state."""
+        """Refresh the status of all instances based on tmux state and activity."""
         instances = self.store.list_all(include_stopped=True)
         for instance in instances:
             if instance.status == InstanceStatus.STOPPED:
@@ -234,7 +266,21 @@ class ClaudeInstanceManager:
             if not self.tmux.window_exists(instance.tmux_window):
                 self.store.update(instance.id, status=InstanceStatus.STOPPED)
             else:
-                self.store.update(instance.id, last_activity=datetime.now())
+                # Detect activity state from logs
+                activity = self.get_activity_state(instance.id)
+                status_map = {
+                    "thinking": InstanceStatus.THINKING,
+                    "tool_use": InstanceStatus.TOOL_USE,
+                    "idle": InstanceStatus.IDLE,
+                    "running": InstanceStatus.RUNNING,
+                    "unknown": InstanceStatus.RUNNING,
+                }
+                new_status = status_map.get(activity.status, InstanceStatus.RUNNING)
+                self.store.update(
+                    instance.id,
+                    status=new_status,
+                    last_activity=datetime.now()
+                )
 
     def get_activity(self, identifier: str, last_n: int = 30) -> list[LogEntry]:
         """

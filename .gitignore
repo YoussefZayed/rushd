@@ -37,3 +37,9 @@ Thumbs.db
 
 # Project specific
 *.log
+config.local.json
+
+# Environment files
+.env
+.env.*
+*.env

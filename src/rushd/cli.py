@@ -8,6 +8,7 @@ import fire
 from rich.console import Console
 from rich.table import Table
 
+from .config import ConfigManager
 from .manager import ClaudeInstanceManager
 from .models import InstanceStatus
 
@@ -18,14 +19,16 @@ console = Console()
 class RushdCLI:
     """CLI for managing Claude Code instances."""
 
-    def __init__(self, session: str = "rushd-instances"):
+    def __init__(self, session: Optional[str] = None):
         """
         Initialize rushd CLI.
 
         Args:
-            session: Tmux session name for instances
+            session: Tmux session name for instances (defaults to config value)
         """
-        self._session = session
+        self._config = ConfigManager()
+        config = self._config.load()
+        self._session = session or config.defaults.session_name
         self._manager: Optional[ClaudeInstanceManager] = None
 
     @property
@@ -48,14 +51,30 @@ class RushdCLI:
         Start a new Claude Code instance.
 
         Args:
-            name: User-friendly name for the instance
-            dir: Working directory (defaults to current)
+            name: User-friendly name for the instance (defaults to primary)
+            dir: Working directory (defaults to primary working dir)
             model: Claude model to use
             prompt: Initial prompt to send
             resume: Session ID to resume
             interactive: If True, don't auto-approve prompts (manual control)
         """
+        # If no name or dir specified, use primary config
+        if name is None and dir is None:
+            primary = self._config.get_primary()
+            name = primary.name
+            dir = str(primary.working_dir)
+            model = model or primary.model
+            if not interactive:
+                interactive = not primary.auto_approve
+            console.print(f"[dim]Using primary instance defaults[/dim]")
+
         working_dir = Path(dir).expanduser().resolve() if dir else None
+
+        # Validate working directory exists
+        if working_dir and not working_dir.exists():
+            console.print(f"[red]Error:[/red] Working directory does not exist: {working_dir}")
+            console.print("[dim]Create the directory or update ~/.rushd/config.json[/dim]")
+            sys.exit(1)
 
         # auto_approve is True by default, but False if --interactive is passed
         auto_approve = not interactive
@@ -90,6 +109,8 @@ class RushdCLI:
             all: Include stopped instances
             json: Output as JSON
         """
+        # Refresh statuses to detect activity state
+        self.manager.refresh_statuses()
         instances = self.manager.list_instances(include_stopped=all)
 
         if json:
@@ -120,19 +141,22 @@ class RushdCLI:
         table.add_column("Directory")
 
         for i, inst in enumerate(instances, 1):
-            status_style = {
-                InstanceStatus.RUNNING: "green",
-                InstanceStatus.STARTING: "yellow",
-                InstanceStatus.IDLE: "blue",
-                InstanceStatus.STOPPED: "red",
-                InstanceStatus.ERROR: "red",
-            }.get(inst.status, "white")
+            # Enhanced status display with activity indicators
+            status_display = {
+                InstanceStatus.RUNNING: "[green]running[/green]",
+                InstanceStatus.STARTING: "[yellow]starting...[/yellow]",
+                InstanceStatus.THINKING: "[cyan]thinking*[/cyan]",
+                InstanceStatus.TOOL_USE: "[magenta]tool~[/magenta]",
+                InstanceStatus.IDLE: "[blue]idle[/blue]",
+                InstanceStatus.STOPPED: "[red]stopped[/red]",
+                InstanceStatus.ERROR: "[red]error![/red]",
+            }.get(inst.status, f"[white]{inst.status}[/white]")
 
             table.add_row(
                 str(i),
                 inst.id[:8],
                 inst.name or "-",
-                f"[{status_style}]{inst.status}[/{status_style}]",
+                status_display,
                 str(inst.working_dir),
             )
 
@@ -162,19 +186,25 @@ class RushdCLI:
             console.print(f"[red]Error:[/red] Instance not found: {instance}")
             sys.exit(1)
 
-    def view(self, instance: str, lines: int = 50, follow: bool = False, activity: bool = False) -> None:
+    def view(self, instance: Optional[str] = None, lines: int = 50, follow: bool = False, activity: bool = False) -> None:
         """
         View output from an instance.
 
         Args:
-            instance: Instance ID or name
+            instance: Instance ID or name (defaults to primary)
             lines: Number of lines to show
             follow: Follow output
             activity: Show structured activity from logs instead of raw terminal
         """
+        # Default to primary instance
+        if instance is None:
+            primary = self._config.get_primary()
+            instance = primary.name
+
         inst = self.manager.get_instance(instance)
         if not inst:
             console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
             sys.exit(1)
 
         if follow:
@@ -201,15 +231,39 @@ class RushdCLI:
                 output = self.manager.capture_output(instance, lines=lines)
             console.print(output)
 
-    def send(self, instance: str, message = "", file: Optional[str] = None) -> None:
+    def send(self, instance_or_message: Optional[str] = None, message="", file: Optional[str] = None) -> None:
         """
         Send a message to an instance.
 
         Args:
-            instance: Instance ID or name
-            message: Message to send
+            instance_or_message: Instance ID/name, or message if no instance specified
+            message: Message to send (when instance is specified)
             file: Read message from file
         """
+        instance = instance_or_message
+
+        # Smart detection: if first arg provided but no message, check if it's an instance or message
+        if instance is not None and not message and not file:
+            # Check if it's actually an instance
+            inst = self.manager.get_instance(instance)
+            if inst is None:
+                # Not an instance - treat it as message to primary
+                message = instance
+                primary = self._config.get_primary()
+                instance = primary.name
+
+        # Default to primary instance if no instance specified
+        if instance is None:
+            primary = self._config.get_primary()
+            instance = primary.name
+
+        # Verify instance exists
+        inst = self.manager.get_instance(instance)
+        if not inst:
+            console.print(f"[yellow]Instance '{instance}' not found.[/yellow]")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
+            sys.exit(1)
+
         if file:
             with open(file, "r") as f:
                 message = f.read()
@@ -227,33 +281,45 @@ class RushdCLI:
             console.print(f"[red]Error:[/red] Failed to send to: {instance}")
             sys.exit(1)
 
-    def attach(self, instance: str) -> None:
+    def attach(self, instance: Optional[str] = None) -> None:
         """
         Attach to an instance's tmux window.
 
         Args:
-            instance: Instance ID or name
+            instance: Instance ID or name (defaults to primary)
         """
+        # Default to primary instance
+        if instance is None:
+            primary = self._config.get_primary()
+            instance = primary.name
+
         inst = self.manager.get_instance(instance)
         if not inst:
             console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
             sys.exit(1)
 
         console.print(f"Attaching to {inst.name or inst.id}... (Ctrl+B D to detach)")
         self.manager.attach(instance)
 
-    def log(self, instance: str) -> None:
+    def log(self, instance: Optional[str] = None) -> None:
         """
         Show the conversation log path for an instance.
 
         Args:
-            instance: Instance ID or name
+            instance: Instance ID or name (defaults to primary)
         """
         from .logs import ClaudeLogReader
+
+        # Default to primary instance
+        if instance is None:
+            primary = self._config.get_primary()
+            instance = primary.name
 
         inst = self.manager.get_instance(instance)
         if not inst:
             console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
             sys.exit(1)
 
         log_reader = ClaudeLogReader(inst.working_dir)
@@ -265,16 +331,22 @@ class RushdCLI:
             console.print(f"[yellow]No log file found for instance {instance}[/yellow]")
             console.print(f"[dim]Expected location: {log_reader.project_dir}[/dim]")
 
-    def status(self, instance: str) -> None:
+    def status(self, instance: Optional[str] = None) -> None:
         """
         Show detailed status of an instance.
 
         Args:
-            instance: Instance ID or name
+            instance: Instance ID or name (defaults to primary)
         """
+        # Default to primary instance
+        if instance is None:
+            primary = self._config.get_primary()
+            instance = primary.name
+
         inst = self.manager.get_instance(instance)
         if not inst:
             console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
             sys.exit(1)
 
         console.print(f"[bold]Instance: {inst.name or inst.id}[/bold]")
@@ -311,6 +383,30 @@ class RushdCLI:
 
         self.manager.cleanup(force=True)
         console.print("[green]Cleanup complete[/green]")
+
+    def config(self, show: bool = False, init: bool = False) -> None:
+        """
+        Manage rushd configuration.
+
+        Args:
+            show: Display current configuration
+            init: Initialize config file with defaults
+        """
+        if init:
+            if self._config.exists():
+                console.print("[yellow]Config already exists at ~/.rushd/config.json[/yellow]")
+                console.print("[dim]Use --show to view current config[/dim]")
+                return
+            from .config import RushdConfig
+            config = RushdConfig()
+            self._config.save(config)
+            console.print("[green]Created config file at ~/.rushd/config.json[/green]")
+            return
+
+        # Default to showing config
+        config = self._config.load()
+        import json as json_lib
+        console.print(json_lib.dumps(config.model_dump(mode="json"), indent=2, default=str))
 
 
 def main():

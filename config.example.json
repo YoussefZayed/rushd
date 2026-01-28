@@ -1,0 +1,12 @@
+{
+  "version": "1.0",
+  "primary": {
+    "name": "primary",
+    "working_dir": "/home/admin/control-center",
+    "model": null,
+    "auto_approve": true
+  },
+  "defaults": {
+    "session_name": "rushd-instances"
+  }
+}
