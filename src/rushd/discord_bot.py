@@ -315,6 +315,12 @@ class RushdDiscordBot(discord.Client):
                     msg += f"\n```json\n{truncate(str(entry.tool_input), 500)}\n```"
                 await channel.send(msg)
                 sent_count += 1
+
+                # Special handling for tools that need user input
+                if entry.tool_name == "ExitPlanMode":
+                    await self._notify_plan_approval_needed()
+                elif entry.tool_name == "AskUserQuestion":
+                    await self._notify_question_asked(entry.tool_input)
             if entry.tool_result:
                 await channel.send(
                     f"📋 Result:\n```\n{truncate(entry.tool_result, 1500)}\n```"
@@ -327,6 +333,51 @@ class RushdDiscordBot(discord.Client):
                 print(f"[Send] Sent {sent_count} messages to activity channel", flush=True)
         except Exception as e:
             print(f"[Send] Error sending to activity: {e}", flush=True)
+
+    async def _notify_plan_approval_needed(self):
+        """Notify user that Claude is waiting for plan approval."""
+        if not self.config.channels.responses:
+            return
+        channel = self.get_channel(self.config.channels.responses)
+        if not channel:
+            return
+        try:
+            await channel.send(
+                "📋 **Plan Ready for Review**\n"
+                "Claude has finished planning and is waiting for your approval.\n"
+                "Reply with `yes`/`approve` to proceed, or provide feedback to modify the plan."
+            )
+            print(f"[Send] Sent plan approval notification", flush=True)
+        except Exception as e:
+            print(f"[Send] Error sending plan notification: {e}", flush=True)
+
+    async def _notify_question_asked(self, tool_input: dict | None):
+        """Notify user that Claude is asking a question."""
+        if not self.config.channels.responses:
+            return
+        channel = self.get_channel(self.config.channels.responses)
+        if not channel:
+            return
+        try:
+            msg = "❓ **Claude is asking a question**\n"
+            if tool_input and isinstance(tool_input, dict):
+                questions = tool_input.get("questions", [])
+                for q in questions:
+                    if isinstance(q, dict):
+                        question_text = q.get("question", "")
+                        options = q.get("options", [])
+                        if question_text:
+                            msg += f"\n**{question_text}**\n"
+                        for i, opt in enumerate(options, 1):
+                            if isinstance(opt, dict):
+                                label = opt.get("label", f"Option {i}")
+                                desc = opt.get("description", "")
+                                msg += f"{i}. **{label}** - {desc}\n"
+                msg += "\nReply with your choice (number or text)."
+            await channel.send(truncate(msg, 1900))
+            print(f"[Send] Sent question notification", flush=True)
+        except Exception as e:
+            print(f"[Send] Error sending question notification: {e}", flush=True)
 
     async def send_to_responses(self, text: str):
         """Send Claude's response to responses channel."""
