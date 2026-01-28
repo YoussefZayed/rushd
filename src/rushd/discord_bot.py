@@ -286,8 +286,11 @@ class RushdDiscordBot(discord.Client):
                 new_status = activity_state.status
                 if new_status != self.last_status:
                     print(f"[Monitor] Status changed: {self.last_status} -> {new_status}", flush=True)
-                    # Reset plan approval flag when Claude starts working
-                    if new_status in ("thinking", "tool_use", "running") and self._awaiting_plan_approval:
+                    # Reset plan approval flag only when transitioning FROM idle to active
+                    # (This means user approved and Claude started implementation)
+                    if (self.last_status == "idle" and
+                        new_status in ("thinking", "tool_use", "running") and
+                        self._awaiting_plan_approval):
                         self._awaiting_plan_approval = False
                         print(f"[Discord] Plan approved, Claude is working", flush=True)
                     await self.send_status_update(new_status, activity_state)
