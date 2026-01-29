@@ -208,6 +208,13 @@ class ClaudeInstanceManager:
             self.store.update(instance.id, last_activity=datetime.now())
         return success
 
+    def send_key(self, identifier: str, key: str) -> bool:
+        """Send a special key to an instance (e.g., 'Down', 'Up', 'Escape', '2')."""
+        instance = self.store.find_by_name_or_id(identifier)
+        if not instance:
+            return False
+        return self.tmux.send_keys(instance.tmux_window, key, enter=False)
+
     def capture_output(self, identifier: str, lines: int = 500) -> str:
         """Capture recent output from an instance."""
         instance = self.store.find_by_name_or_id(identifier)

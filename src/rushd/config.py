@@ -34,6 +34,7 @@ class DiscordChannels(BaseModel):
     responses: Optional[int] = Field(default=None, description="Responses only channel")
     status: Optional[int] = Field(default=None, description="Status notifications channel")
     commands: Optional[int] = Field(default=None, description="Commands input channel")
+    live_view: Optional[int] = Field(default=None, description="Live view channel (single updating message)")
 
 
 class DiscordConfig(BaseModel):

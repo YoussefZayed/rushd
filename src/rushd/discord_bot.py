@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import time
 from typing import Optional
 
 import discord
@@ -51,6 +52,7 @@ class RushdDiscordBot(discord.Client):
         "responses": "responses",
         "status": "status",
         "commands": "commands",
+        "live_view": "live-view",
     }
 
     def __init__(
@@ -73,6 +75,8 @@ class RushdDiscordBot(discord.Client):
         self.last_status: str = "unknown"
         self._clearing: bool = False  # Flag to pause monitor during /clear
         self._awaiting_plan_approval: bool = False  # Flag when ExitPlanMode was called
+        self._live_view_message_id: Optional[int] = None
+        self._last_live_view_update: float = 0
 
     # Keywords that indicate plan approval (case-insensitive)
     APPROVAL_KEYWORDS = {"yes", "y", "approve", "ok", "proceed", "lgtm", "looks good", "go ahead", "approved"}
@@ -229,8 +233,37 @@ class RushdDiscordBot(discord.Client):
             "responses": "Claude's text responses only",
             "status": "Status notifications (working, idle, done)",
             "commands": "Send commands to Claude here",
+            "live_view": "Live view of Claude's activity (auto-updating)",
         }
         return topics.get(channel_key, "rushd channel")
+
+    async def update_live_view(self):
+        """Update the live view message with current activity."""
+        if not self.config.channels.live_view:
+            return
+        channel = self.get_channel(self.config.channels.live_view)
+        if not channel:
+            return
+
+        # Get formatted activity
+        output = self.manager.get_activity_formatted(self.primary_name, last_n=30)
+        content = f"```\n{output[:1900]}\n```"
+
+        try:
+            if self._live_view_message_id:
+                # Edit existing message
+                msg = await channel.fetch_message(self._live_view_message_id)
+                await msg.edit(content=content)
+            else:
+                # Create initial message
+                msg = await channel.send(content)
+                self._live_view_message_id = msg.id
+        except discord.NotFound:
+            # Message was deleted, create new one
+            msg = await channel.send(content)
+            self._live_view_message_id = msg.id
+        except Exception as e:
+            print(f"[LiveView] Error updating live view: {e}", flush=True)
 
     async def monitor_primary(self):
         """Poll primary instance and dispatch to appropriate channels."""
@@ -284,17 +317,30 @@ class RushdDiscordBot(discord.Client):
                         await self.send_to_responses(entry.text_response)
 
                 new_status = activity_state.status
-                if new_status != self.last_status:
-                    print(f"[Monitor] Status changed: {self.last_status} -> {new_status}", flush=True)
+                old_status = self.last_status
+
+                if new_status != old_status:
+                    print(f"[Monitor] Status changed: {old_status} -> {new_status}", flush=True)
                     # Reset plan approval flag only when transitioning FROM idle to active
                     # (This means user approved and Claude started implementation)
-                    if (self.last_status == "idle" and
+                    if (old_status == "idle" and
                         new_status in ("thinking", "tool_use", "running") and
                         self._awaiting_plan_approval):
                         self._awaiting_plan_approval = False
                         print(f"[Discord] Plan approved, Claude is working", flush=True)
                     await self.send_status_update(new_status, activity_state)
                     self.last_status = new_status
+
+                # Update live view every 5 seconds when not idle
+                now = time.time()
+                if new_status != "idle":
+                    if now - self._last_live_view_update >= 5:
+                        await self.update_live_view()
+                        self._last_live_view_update = now
+                elif new_status == "idle" and old_status != "idle":
+                    # Final update when transitioning to idle
+                    await self.update_live_view()
+                    self._last_live_view_update = now
 
             except Exception as e:
                 print(f"Monitor error: {e}", flush=True)
@@ -453,14 +499,20 @@ class RushdDiscordBot(discord.Client):
         # If awaiting plan approval, distinguish approval from feedback
         if self._awaiting_plan_approval:
             if content.lower() in self.APPROVAL_KEYWORDS:
-                # Approval - send as-is
+                # Approval - press "2" to select approve option
                 print(f"[Discord] Detected plan approval keyword: {content}", flush=True)
+                success = self.manager.send_key(self.primary_name, "2")
             else:
-                # Feedback - prefix to make intent clear to Claude
-                content = f"User wants to modify the plan: {content}"
-                print(f"[Discord] Detected plan feedback, prefixing message", flush=True)
-
-        success = self.manager.send_message(self.primary_name, content)
+                # Feedback - navigate to modify option (Down×3), then send text
+                print(f"[Discord] Detected plan feedback, navigating to modify option", flush=True)
+                for _ in range(3):
+                    self.manager.send_key(self.primary_name, "Down")
+                    await asyncio.sleep(0.1)
+                await asyncio.sleep(0.2)
+                # Send the feedback text
+                success = self.manager.send_message(self.primary_name, content)
+        else:
+            success = self.manager.send_message(self.primary_name, content)
 
         if success:
             await message.add_reaction("✅")
