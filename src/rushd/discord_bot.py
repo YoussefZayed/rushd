@@ -110,6 +110,10 @@ class RushdDiscordBot(discord.Client):
             self.manager.stop_instance(self.primary_name, force=True)
             print(f"[Discord] Stopped primary instance", flush=True)
 
+            # Remove old instance from store to prevent duplicates
+            self.manager.remove_instance(self.primary_name)
+            print(f"[Discord] Removed old primary from store", flush=True)
+
             # Get primary config for recreation
             from .config import ConfigManager
             config_mgr = ConfigManager()

@@ -184,6 +184,13 @@ class ClaudeInstanceManager:
         """Get an instance by ID or name."""
         return self.store.find_by_name_or_id(identifier)
 
+    def remove_instance(self, identifier: str) -> bool:
+        """Remove an instance from storage entirely (does not stop it first)."""
+        instance = self.store.find_by_name_or_id(identifier)
+        if instance:
+            return self.store.remove(instance.id)
+        return False
+
     def get_primary_instance(self, primary_name: str = "primary") -> Optional[InstanceMetadata]:
         """Get the primary instance if it exists."""
         return self.store.find_by_name_or_id(primary_name)

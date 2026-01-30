@@ -45,8 +45,22 @@ class InstanceStore:
         store.instances = instances
         self._save_raw(store)
 
+    def find_by_name(self, name: str) -> Optional[InstanceMetadata]:
+        """Find an instance by exact name match."""
+        store = self._load_raw()
+        for inst in store.instances.values():
+            if inst.name and inst.name == name:
+                return inst
+        return None
+
     def add(self, instance: InstanceMetadata) -> None:
-        """Add a new instance to storage."""
+        """Add a new instance to storage. Raises ValueError if name already exists."""
+        if instance.name:
+            existing = self.find_by_name(instance.name)
+            if existing:
+                raise ValueError(
+                    f"Instance with name '{instance.name}' already exists (id: {existing.id})"
+                )
         store = self._load_raw()
         store.instances[instance.id] = instance
         self._save_raw(store)

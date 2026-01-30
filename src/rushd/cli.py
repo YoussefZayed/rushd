@@ -365,6 +365,30 @@ class RushdCLI:
         console.print(f"  Auto-Approve: {inst.auto_approve}")
         console.print(f"  Display Mode: {inst.display_mode}")
 
+    def remove(self, instance: str) -> None:
+        """
+        Remove an instance from storage (must be stopped first).
+
+        Args:
+            instance: Instance ID or name to remove
+        """
+        inst = self.manager.get_instance(instance)
+        if not inst:
+            console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            sys.exit(1)
+
+        if inst.status != InstanceStatus.STOPPED:
+            # Check if tmux window still exists
+            if self.manager.tmux.window_exists(inst.tmux_window):
+                console.print(f"[red]Error:[/red] Instance is still running. Stop it first with 'rushd stop {instance}'")
+                sys.exit(1)
+
+        if self.manager.remove_instance(instance):
+            console.print(f"[green]Removed:[/green] {instance}")
+        else:
+            console.print(f"[red]Error:[/red] Failed to remove: {instance}")
+            sys.exit(1)
+
     def cleanup(self, force: bool = False) -> None:
         """
         Stop all instances and remove the tmux session.
