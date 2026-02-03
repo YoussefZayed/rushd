@@ -45,6 +45,7 @@ class DiscordConfig(BaseModel):
     channels: DiscordChannels = Field(default_factory=DiscordChannels)
     allowed_users: list[str] = Field(default_factory=list, description="Discord usernames allowed to send commands")
     poll_interval: float = Field(default=2.0, description="Seconds between activity checks")
+    screenshot_retention_days: int = Field(default=5, description="Days to keep screenshots before deletion")
 
 
 class RushdConfig(BaseModel):

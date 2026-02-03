@@ -128,7 +128,7 @@ class ClaudeLogReader:
             elif isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "tool_result":
-                        entry.tool_result = str(item.get("content", ""))[:500]
+                        entry.tool_result = str(item.get("content", ""))
                         entry.is_error = item.get("is_error", False)
 
                         # Also check toolUseResult for more details
@@ -138,9 +138,9 @@ class ClaudeLogReader:
                             stderr = tool_result.get("stderr", "")
                             if stderr:
                                 entry.is_error = True
-                                entry.tool_result = stderr[:500]
+                                entry.tool_result = stderr
                             elif stdout:
-                                entry.tool_result = stdout[:500]
+                                entry.tool_result = stdout
 
         # Handle assistant messages
         elif entry_type == "assistant":
@@ -155,14 +155,14 @@ class ClaudeLogReader:
                     item_type = item.get("type")
 
                     if item_type == "thinking":
-                        entry.thinking = item.get("thinking", "")[:300]
+                        entry.thinking = item.get("thinking", "")
 
                     elif item_type == "tool_use":
                         entry.tool_name = item.get("name")
                         entry.tool_input = item.get("input", {})
 
                     elif item_type == "text":
-                        entry.text_response = item.get("text", "")[:500]
+                        entry.text_response = item.get("text", "")
 
         return entry
 

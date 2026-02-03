@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import time
+from pathlib import Path
 from typing import Optional
 
 import discord
@@ -20,18 +21,24 @@ def truncate(text: str, max_len: int) -> str:
 
 
 def split_message(text: str, max_len: int) -> list[str]:
-    """Split message into chunks respecting Discord's limit."""
+    """Split message into chunks at sentence/word boundaries."""
+    if not text:
+        return [""]
     chunks = []
     while text:
         if len(text) <= max_len:
             chunks.append(text)
             break
-        split_at = text.rfind("\n", 0, max_len)
-        if split_at == -1:
-            split_at = max_len
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    return chunks
+        # Find best split point (sentence > paragraph > word > hard limit)
+        split_at = max_len
+        for sep in [". ", ".\n", "! ", "? ", "\n\n", "\n", " "]:
+            pos = text.rfind(sep, 0, max_len)
+            if pos > max_len // 2:  # Don't split too early
+                split_at = pos + len(sep.rstrip())
+                break
+        chunks.append(text[:split_at].rstrip())
+        text = text[split_at:].lstrip()
+    return chunks if chunks else [""]
 
 
 def hash_entry(entry: LogEntry) -> str:
@@ -81,6 +88,9 @@ class RushdDiscordBot(discord.Client):
     # Keywords that indicate plan approval (case-insensitive)
     APPROVAL_KEYWORDS = {"yes", "y", "approve", "ok", "proceed", "lgtm", "looks good", "go ahead", "approved"}
 
+    # Directory for storing screenshots from Discord
+    SCREENSHOT_DIR = Path.home() / ".rushd" / "screenshots"
+
     def _get_channel_name(self, suffix: str) -> str:
         """Generate channel name using primary instance name."""
         return f"{self.primary_name}-{suffix}"
@@ -88,6 +98,9 @@ class RushdDiscordBot(discord.Client):
     async def on_ready(self):
         print(f"Discord bot connected as {self.user}", flush=True)
         await self.ensure_channels_exist()
+        deleted = await self._cleanup_old_screenshots()
+        if deleted > 0:
+            print(f"[Discord] Cleaned up {deleted} old screenshots on startup", flush=True)
         await self._initialize_seen_entries()
         self.loop.create_task(self.monitor_primary())
 
@@ -167,7 +180,7 @@ class RushdDiscordBot(discord.Client):
         try:
             # Refresh to get current instance state
             self.manager.refresh_statuses()
-            entries = self.manager.get_activity(self.primary_name, last_n=100)
+            entries = self.manager.get_activity(self.primary_name, last_n=300)
             for entry in entries:
                 self.seen_entries.add(hash_entry(entry))
             print(f"Initialized {len(self.seen_entries)} existing entries as seen", flush=True)
@@ -302,7 +315,7 @@ class RushdDiscordBot(discord.Client):
                     await asyncio.sleep(self.config.poll_interval)
                     continue
 
-                entries = self.manager.get_activity(self.primary_name, last_n=20)
+                entries = self.manager.get_activity(self.primary_name, last_n=200)
                 if poll_count % 15 == 0:  # Log every 30 seconds
                     print(f"[Monitor] Poll #{poll_count}: {len(entries)} entries, {len(self.seen_entries)} seen", flush=True)
                 activity_state = self.manager.get_activity_state(self.primary_name)
@@ -366,16 +379,22 @@ class RushdDiscordBot(discord.Client):
         sent_count = 0
         try:
             if entry.thinking:
-                await channel.send(
-                    f"🤔 *thinking...*\n```\n{truncate(entry.thinking, 1500)}\n```"
-                )
-                sent_count += 1
+                for chunk in split_message(entry.thinking, 1500):
+                    await channel.send(f"🤔 *thinking...*\n```\n{chunk}\n```")
+                    sent_count += 1
             if entry.tool_name:
                 msg = f"🔧 **{entry.tool_name}**"
                 if entry.tool_input:
-                    msg += f"\n```json\n{truncate(str(entry.tool_input), 500)}\n```"
-                await channel.send(msg)
-                sent_count += 1
+                    tool_input_str = str(entry.tool_input)
+                    for i, chunk in enumerate(split_message(tool_input_str, 500)):
+                        if i == 0:
+                            await channel.send(f"{msg}\n```json\n{chunk}\n```")
+                        else:
+                            await channel.send(f"```json\n{chunk}\n```")
+                        sent_count += 1
+                else:
+                    await channel.send(msg)
+                    sent_count += 1
 
                 # Special handling for tools that need user input
                 if entry.tool_name == "ExitPlanMode":
@@ -385,13 +404,13 @@ class RushdDiscordBot(discord.Client):
                 elif entry.tool_name == "AskUserQuestion":
                     await self._notify_question_asked(entry.tool_input)
             if entry.tool_result:
-                await channel.send(
-                    f"📋 Result:\n```\n{truncate(entry.tool_result, 1500)}\n```"
-                )
-                sent_count += 1
+                for chunk in split_message(entry.tool_result, 1500):
+                    await channel.send(f"📋 Result:\n```\n{chunk}\n```")
+                    sent_count += 1
             if entry.text_response:
-                await channel.send(f"💬 {truncate(entry.text_response, 1900)}")
-                sent_count += 1
+                for chunk in split_message(entry.text_response, 1900):
+                    await channel.send(f"💬 {chunk}")
+                    sent_count += 1
             if sent_count > 0:
                 print(f"[Send] Sent {sent_count} messages to activity channel", flush=True)
         except Exception as e:
@@ -476,6 +495,80 @@ class RushdDiscordBot(discord.Client):
         }
         await channel.send(status_messages.get(status, f"Status: {status}"))
 
+    async def _cleanup_old_screenshots(self) -> int:
+        """Delete screenshots older than retention period."""
+        retention_days = self.config.screenshot_retention_days
+        cutoff_time = time.time() - (retention_days * 24 * 60 * 60)
+        deleted_count = 0
+
+        if not self.SCREENSHOT_DIR.exists():
+            return 0
+
+        for filepath in self.SCREENSHOT_DIR.iterdir():
+            if filepath.is_file():
+                try:
+                    if filepath.stat().st_mtime < cutoff_time:
+                        filepath.unlink()
+                        deleted_count += 1
+                        print(f"[Cleanup] Deleted old screenshot: {filepath.name}", flush=True)
+                except Exception as e:
+                    print(f"[Cleanup] Error deleting {filepath}: {e}", flush=True)
+
+        if deleted_count > 0:
+            print(f"[Cleanup] Deleted {deleted_count} screenshots older than {retention_days} days", flush=True)
+        return deleted_count
+
+    async def _auto_start_primary(self) -> bool:
+        """Auto-start the primary instance if not running."""
+        try:
+            primary_config = self.config_manager.get_primary()
+
+            # Remove any stopped instance with same name
+            self.manager.remove_instance(primary_config.name)
+
+            # Start the primary instance
+            instance = self.manager.start_instance(
+                name=primary_config.name,
+                working_dir=primary_config.working_dir,
+                model=primary_config.model,
+                auto_approve=primary_config.auto_approve,
+            )
+            print(f"[Discord] Auto-started primary instance: {instance.id}", flush=True)
+
+            # Wait briefly for initialization
+            await asyncio.sleep(3)
+
+            # Send status notification
+            if self.config.channels.status:
+                status_ch = self.get_channel(self.config.channels.status)
+                if status_ch:
+                    await status_ch.send("🚀 Auto-started primary instance")
+
+            return True
+        except Exception as e:
+            print(f"[Discord] Failed to auto-start primary: {e}", flush=True)
+            return False
+
+    async def _download_attachment(self, attachment: discord.Attachment) -> Optional[Path]:
+        """Download a Discord attachment and save it locally."""
+        try:
+            # Ensure screenshot directory exists
+            self.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+            # Generate unique filename with timestamp
+            timestamp = int(time.time() * 1000)
+            suffix = Path(attachment.filename).suffix or ".png"
+            filename = f"screenshot_{timestamp}{suffix}"
+            filepath = self.SCREENSHOT_DIR / filename
+
+            # Download and save
+            await attachment.save(filepath)
+            print(f"[Discord] Saved attachment to {filepath}", flush=True)
+            return filepath
+        except Exception as e:
+            print(f"[Discord] Error downloading attachment: {e}", flush=True)
+            return None
+
     async def on_message(self, message: discord.Message):
         """Handle incoming Discord messages."""
         if message.author == self.user:
@@ -493,7 +586,33 @@ class RushdDiscordBot(discord.Client):
 
         print(f"[Discord] Received command from {message.author.name}: {message.content[:50]}...", flush=True)
 
+        # Auto-start primary if not running
+        if not self.manager.is_primary_running(self.primary_name):
+            started = await self._auto_start_primary()
+            if not started:
+                await message.add_reaction("❌")
+                await message.reply("Failed to auto-start primary instance.")
+                return
+
         content = message.content.strip()
+
+        # Handle attachments (screenshots, images)
+        attachment_paths = []
+        for attachment in message.attachments:
+            # Check if it's an image
+            if attachment.content_type and attachment.content_type.startswith("image/"):
+                filepath = await self._download_attachment(attachment)
+                if filepath:
+                    attachment_paths.append(str(filepath))
+
+        # If there are attachments, append their paths to the message
+        if attachment_paths:
+            paths_text = "\n".join(f"Please read and analyze this image file: {p}" for p in attachment_paths)
+            if content:
+                content = f"{content}\n\n{paths_text}"
+            else:
+                content = paths_text
+            print(f"[Discord] Message includes {len(attachment_paths)} screenshot(s)", flush=True)
 
         # Handle /clear command - destroy and recreate primary instance
         if content.lower() == "/clear":
