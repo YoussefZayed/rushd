@@ -48,6 +48,18 @@ class DiscordConfig(BaseModel):
     screenshot_retention_days: int = Field(default=5, description="Days to keep screenshots before deletion")
 
 
+class LogConfig(BaseModel):
+    """Output logging configuration."""
+
+    enabled: bool = Field(default=True, description="Enable output logging")
+    max_file_size_mb: int = Field(default=50, description="Max log file size before rotation")
+    retention_days: int = Field(default=7, description="Days to keep logs before cleanup")
+    log_dir: Path = Field(
+        default_factory=lambda: Path.home() / ".rushd" / "logs",
+        description="Directory for output logs",
+    )
+
+
 class RushdConfig(BaseModel):
     """Root configuration model."""
 
@@ -55,6 +67,7 @@ class RushdConfig(BaseModel):
     primary: PrimaryConfig = Field(default_factory=PrimaryConfig)
     defaults: DefaultsConfig = Field(default_factory=DefaultsConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    logs: LogConfig = Field(default_factory=LogConfig)
 
 
 class ConfigManager:

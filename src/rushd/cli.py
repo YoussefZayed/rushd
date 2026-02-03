@@ -466,6 +466,119 @@ class RushdCLI:
         console.print("[dim]Channels will be auto-created if needed[/dim]")
         run_discord_bot(self.manager, config.discord, self._config, primary_name, token)
 
+    def logs(
+        self,
+        instance: Optional[str] = None,
+        follow: bool = False,
+        lines: int = 100,
+        clear: bool = False,
+        list: bool = False,
+        search: Optional[str] = None,
+    ) -> None:
+        """
+        View or manage persistent output logs.
+
+        Args:
+            instance: Instance ID or name (defaults to primary)
+            follow: Follow logs in real-time
+            lines: Number of lines to show (default: 100)
+            clear: Clear logs (for instance or all if no instance)
+            list: List all log files with sizes
+            search: Search pattern (regex) across all logs
+        """
+        # Handle --list: show all log files
+        if list:
+            log_files = self.manager.list_all_output_logs()
+            if not log_files:
+                console.print("[dim]No log files found[/dim]")
+                return
+
+            table = Table(title="Output Log Files")
+            table.add_column("File", style="cyan")
+            table.add_column("Size", justify="right")
+
+            total_size = 0
+            for path, size in log_files:
+                total_size += size
+                size_str = self._format_size(size)
+                table.add_row(path.name, size_str)
+
+            console.print(table)
+            console.print(f"[dim]Total: {self._format_size(total_size)}[/dim]")
+            return
+
+        # Handle --search: search across all logs
+        if search:
+            results = self.manager.search_output_logs(search)
+            if not results:
+                console.print(f"[yellow]No matches found for:[/yellow] {search}")
+                return
+
+            console.print(f"[green]Found {len(results)} match(es):[/green]")
+            current_file = None
+            for path, line_num, line in results:
+                if path != current_file:
+                    console.print(f"\n[bold cyan]{path.name}[/bold cyan]")
+                    current_file = path
+                console.print(f"  [dim]{line_num}:[/dim] {line}")
+            return
+
+        # Handle --clear: clear logs
+        if clear:
+            if instance:
+                count = self.manager.clear_instance_logs(instance)
+                console.print(f"[green]Cleared {count} log file(s) for {instance}[/green]")
+            else:
+                count = self.manager.clear_instance_logs(None)
+                console.print(f"[green]Cleared {count} log file(s)[/green]")
+            return
+
+        # Default: show logs for instance
+        if instance is None:
+            primary = self._config.get_primary()
+            instance = primary.name
+
+        inst = self.manager.get_instance(instance)
+        if not inst:
+            console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            console.print("[dim]Start it with 'rushd start'[/dim]")
+            sys.exit(1)
+
+        if follow:
+            import time
+            last_output = ""
+            console.print(f"[dim]Following logs for {instance}... (Ctrl+C to stop)[/dim]")
+            try:
+                while True:
+                    # Capture current terminal output to update logs
+                    self.manager.capture_output(instance, lines=500)
+                    # Read from persistent logs
+                    output = self.manager.get_instance_logs(instance, lines=lines)
+                    if output != last_output:
+                        console.clear()
+                        console.print(f"[dim]── {instance} logs ──[/dim]")
+                        console.print(output)
+                        last_output = output
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                console.print("\n[dim]Stopped following logs[/dim]")
+        else:
+            # First capture current state to ensure logs are up to date
+            self.manager.capture_output(instance, lines=500)
+            output = self.manager.get_instance_logs(instance, lines=lines)
+            if not output:
+                console.print(f"[dim]No logs found for {instance}[/dim]")
+                return
+            console.print(output)
+
+    def _format_size(self, size_bytes: int) -> str:
+        """Format bytes to human-readable size."""
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size_bytes < 1024:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f} TB"
+
 
 def main():
     """Main entry point."""
