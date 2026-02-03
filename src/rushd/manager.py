@@ -5,7 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .config import ConfigManager, LogConfig
 from .models import InstanceMetadata, InstanceStatus, DisplayMode
+from .output_log import OutputLogManager, OutputLogWriter
 from .store import InstanceStore
 from .tmux import TmuxController
 from .logs import ClaudeLogReader, LogEntry, format_activity, ActivityState
@@ -18,6 +20,22 @@ class ClaudeInstanceManager:
         self.session_name = session_name
         self.store = InstanceStore()
         self.tmux = TmuxController(session_name)
+
+        # Load log configuration
+        config_manager = ConfigManager()
+        config = config_manager.load()
+        self._log_config: LogConfig = config.logs
+
+        # Initialize output log manager
+        self._output_log_manager: Optional[OutputLogManager] = None
+        if self._log_config.enabled:
+            self._output_log_manager = OutputLogManager(
+                log_dir=self._log_config.log_dir,
+                max_file_size_mb=self._log_config.max_file_size_mb,
+                retention_days=self._log_config.retention_days,
+            )
+            # Cleanup old logs on startup
+            self._output_log_manager.cleanup_old_logs()
 
     def _generate_id(self) -> tuple[str, str]:
         """Generate a new instance ID (short_id, full_id)."""
@@ -228,7 +246,20 @@ class ClaudeInstanceManager:
         if not instance:
             return ""
 
-        return self.tmux.capture_pane(instance.tmux_window, lines=lines)
+        output = self.tmux.capture_pane(instance.tmux_window, lines=lines)
+
+        # Log the output if logging is enabled
+        self._capture_and_log(instance, output)
+
+        return output
+
+    def _capture_and_log(self, instance: InstanceMetadata, content: str) -> None:
+        """Write captured output to the log file."""
+        if not self._output_log_manager or not content:
+            return
+
+        writer = self._output_log_manager.get_writer(instance.id, instance.name)
+        writer.write_output(content)
 
     def attach(self, identifier: str) -> bool:
         """
@@ -353,3 +384,61 @@ class ClaudeInstanceManager:
         if not instance:
             return DisplayMode.ACTIVITY
         return DisplayMode(instance.display_mode)
+
+    # Output logging methods
+
+    def get_instance_logs(self, identifier: str, lines: int = 100) -> str:
+        """
+        Read saved output logs for an instance.
+
+        Args:
+            identifier: Instance ID or name
+            lines: Number of lines to return
+
+        Returns:
+            Log content as string
+        """
+        if not self._output_log_manager:
+            return "[Output logging is disabled]"
+
+        instance = self.store.find_by_name_or_id(identifier)
+        if not instance:
+            return ""
+
+        writer = self._output_log_manager.get_writer(instance.id, instance.name)
+        return writer.read_logs(lines=lines)
+
+    def clear_instance_logs(self, identifier: Optional[str] = None) -> int:
+        """
+        Clear output logs for an instance or all instances.
+
+        Args:
+            identifier: Instance ID/name, or None to clear all
+
+        Returns:
+            Number of log files deleted
+        """
+        if not self._output_log_manager:
+            return 0
+
+        if identifier is None:
+            return self._output_log_manager.clear_all_logs()
+
+        instance = self.store.find_by_name_or_id(identifier)
+        if not instance:
+            return 0
+
+        writer = self._output_log_manager.get_writer(instance.id, instance.name)
+        return writer.clear_logs()
+
+    def list_all_output_logs(self) -> list[tuple[Path, int]]:
+        """List all output log files with sizes."""
+        if not self._output_log_manager:
+            return []
+        return self._output_log_manager.list_all_logs()
+
+    def search_output_logs(self, pattern: str, max_results: int = 100) -> list[tuple[Path, int, str]]:
+        """Search across all output logs with regex pattern."""
+        if not self._output_log_manager:
+            return []
+        return self._output_log_manager.search_logs(pattern, max_results)
