@@ -216,3 +216,23 @@ class TmuxController:
             return int(output)
         except ValueError:
             return None
+
+    def get_current_pane_id(self) -> Optional[str]:
+        """Get the pane ID of the current tmux pane, if running inside tmux."""
+        import os
+
+        # Use TMUX_PANE env var (set automatically by tmux)
+        pane_id = os.environ.get("TMUX_PANE")
+        if pane_id:
+            return pane_id
+
+        # Not in tmux
+        if not os.environ.get("TMUX"):
+            return None
+
+        # Fallback: query tmux directly
+        output, code = self._run_tmux(["display-message", "-p", "#{pane_id}"])
+        if code == 0 and output:
+            return output
+
+        return None

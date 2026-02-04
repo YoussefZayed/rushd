@@ -504,9 +504,23 @@ class ClaudeInstanceManager:
             limit=limit,
         )
 
+    def find_instance_by_tmux_pane(self) -> Optional[InstanceMetadata]:
+        """Find the instance corresponding to the current tmux pane."""
+        pane_id = self.tmux.get_current_pane_id()
+        if not pane_id:
+            return None
+
+        instance = self.store.find_by_pane_id(pane_id)
+        if instance and instance.status != InstanceStatus.STOPPED:
+            return instance
+        return None
+
     def find_instance_by_cwd(self, cwd: Path) -> Optional[InstanceMetadata]:
         """
         Find a running instance by its working directory.
+
+        First attempts to match by tmux pane ID (if running inside tmux),
+        then falls back to directory matching.
 
         Args:
             cwd: Working directory to match
@@ -514,6 +528,12 @@ class ClaudeInstanceManager:
         Returns:
             Matching instance or None
         """
+        # Try tmux pane matching first (accurate when multiple workers share CWD)
+        pane_instance = self.find_instance_by_tmux_pane()
+        if pane_instance:
+            return pane_instance
+
+        # Fall back to directory matching
         cwd = cwd.resolve()
         instances = self.list_instances(include_stopped=False)
         for instance in instances:

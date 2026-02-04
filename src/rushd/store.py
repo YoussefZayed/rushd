@@ -122,6 +122,14 @@ class InstanceStore:
 
         return None
 
+    def find_by_pane_id(self, pane_id: str) -> Optional[InstanceMetadata]:
+        """Find an instance by its tmux pane ID."""
+        store = self._load_raw()
+        for inst in store.instances.values():
+            if inst.tmux_pane_id == pane_id:
+                return inst
+        return None
+
     def get_session_name(self) -> str:
         """Get the tmux session name."""
         return self._load_raw().session_name
