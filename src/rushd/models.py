@@ -27,6 +27,27 @@ class DisplayMode(str, Enum):
     RAW = "raw"  # Raw terminal output
 
 
+class NotificationStatus(str, Enum):
+    """Status of a worker notification."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    INFO = "info"
+
+
+class Notification(BaseModel):
+    """A notification from a worker to the primary instance."""
+
+    id: str = Field(description="Unique notification ID (UUID)")
+    worker_id: str = Field(description="Instance ID of the sending worker")
+    worker_name: Optional[str] = Field(default=None, description="Name of the sending worker")
+    status: NotificationStatus = Field(description="Completion status")
+    message: Optional[str] = Field(default=None, description="Optional message content")
+    created_at: datetime = Field(default_factory=datetime.now)
+    delivered: bool = Field(default=False, description="Whether delivered to primary")
+    delivered_at: Optional[datetime] = Field(default=None)
+
+
 class InstanceMetadata(BaseModel):
     """Metadata for a managed Claude Code instance."""
 
@@ -45,6 +66,10 @@ class InstanceMetadata(BaseModel):
     claude_session_id: Optional[str] = Field(default=None, description="Claude Code session UUID")
     display_mode: DisplayMode = Field(default=DisplayMode.ACTIVITY, description="Output display mode")
     auto_approve: bool = Field(default=True, description="Whether instance uses --dangerously-skip-permissions")
+
+    # New fields for auto-idle notifications
+    idle_since: Optional[datetime] = Field(default=None, description="Timestamp when instance first became idle")
+    auto_notified: bool = Field(default=False, description="Whether auto-notification was sent for current idle period")
 
     class Config:
         use_enum_values = True

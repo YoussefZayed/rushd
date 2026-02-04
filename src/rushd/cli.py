@@ -10,7 +10,7 @@ from rich.table import Table
 
 from .config import ConfigManager
 from .manager import ClaudeInstanceManager
-from .models import InstanceStatus
+from .models import InstanceStatus, NotificationStatus
 
 
 console = Console()
@@ -465,6 +465,140 @@ class RushdCLI:
         console.print(f"[green]Starting Discord bot for '{primary_name}'...[/green]")
         console.print("[dim]Channels will be auto-created if needed[/dim]")
         run_discord_bot(self.manager, config.discord, self._config, primary_name, token)
+
+    def notify(
+        self,
+        status: str = "success",
+        message: Optional[str] = None,
+        worker: Optional[str] = None,
+        primary: Optional[str] = None,
+    ) -> None:
+        """
+        Send a notification from a worker to the primary instance.
+
+        Args:
+            status: Notification status: success, failure, or info (default: success)
+            message: Message content to send
+            worker: Worker instance ID or name (auto-detected from CWD if not specified)
+            primary: Primary instance name (defaults to config primary)
+        """
+        # Validate status
+        valid_statuses = ["success", "failure", "info"]
+        if status not in valid_statuses:
+            console.print(f"[red]Error:[/red] Invalid status '{status}'")
+            console.print(f"[dim]Valid values: {', '.join(valid_statuses)}[/dim]")
+            sys.exit(1)
+
+        notification_status = NotificationStatus(status)
+
+        # Auto-detect worker from CWD if not specified
+        if worker is None:
+            cwd = Path.cwd()
+            inst = self.manager.find_instance_by_cwd(cwd)
+            if inst:
+                worker = inst.name or inst.id
+                console.print(f"[dim]Auto-detected worker: {worker}[/dim]")
+            else:
+                console.print("[red]Error:[/red] Could not auto-detect worker instance from current directory")
+                console.print("[dim]Specify --worker or run from a worker's working directory[/dim]")
+                sys.exit(1)
+
+        # Get primary name from config if not specified
+        if primary is None:
+            primary = self._config.get_primary().name
+
+        # Send notification
+        success, result = self.manager.send_notification(
+            worker_identifier=worker,
+            status=notification_status,
+            message=message,
+            primary_name=primary,
+        )
+
+        if success:
+            console.print(f"[green]Notification sent[/green]")
+            console.print(f"  ID: {result}")
+            console.print(f"  Status: {status}")
+            if message:
+                console.print(f"  Message: {message}")
+        else:
+            console.print(f"[red]Error:[/red] {result}")
+            sys.exit(1)
+
+    def notifications(
+        self,
+        worker: Optional[str] = None,
+        limit: int = 20,
+        undelivered: bool = False,
+        json: bool = False,
+    ) -> None:
+        """
+        List worker notifications.
+
+        Args:
+            worker: Filter by worker instance ID or name
+            limit: Maximum number of notifications to show (default: 20)
+            undelivered: Only show undelivered notifications
+            json: Output as JSON
+        """
+        notifications_list = self.manager.list_notifications(
+            worker_identifier=worker,
+            undelivered_only=undelivered,
+            limit=limit,
+        )
+
+        if json:
+            import json as json_lib
+            data = [
+                {
+                    "id": n.id,
+                    "worker_id": n.worker_id,
+                    "worker_name": n.worker_name,
+                    "status": n.status,
+                    "message": n.message,
+                    "created_at": n.created_at.isoformat() if n.created_at else None,
+                    "delivered": n.delivered,
+                    "delivered_at": n.delivered_at.isoformat() if n.delivered_at else None,
+                }
+                for n in notifications_list
+            ]
+            console.print(json_lib.dumps(data, indent=2))
+            return
+
+        if not notifications_list:
+            console.print("[dim]No notifications found[/dim]")
+            return
+
+        table = Table(title="Worker Notifications")
+        table.add_column("Time", style="dim")
+        table.add_column("Worker", style="cyan")
+        table.add_column("Status")
+        table.add_column("Message")
+        table.add_column("Delivered", style="dim")
+
+        for n in notifications_list:
+            # Format time
+            time_str = n.created_at.strftime("%Y-%m-%d %H:%M:%S") if n.created_at else "-"
+
+            # Status with color
+            status_display = {
+                "success": "[green]success[/green]",
+                "failure": "[red]failure[/red]",
+                "info": "[blue]info[/blue]",
+            }.get(n.status, n.status)
+
+            # Delivered indicator
+            delivered_str = "[green]Yes[/green]" if n.delivered else "[yellow]No[/yellow]"
+
+            table.add_row(
+                time_str,
+                n.worker_name or n.worker_id,
+                status_display,
+                n.message or "-",
+                delivered_str,
+            )
+
+        console.print(table)
 
 
 def main():
