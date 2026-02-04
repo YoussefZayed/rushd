@@ -27,6 +27,27 @@ class DisplayMode(str, Enum):
     RAW = "raw"  # Raw terminal output
 
 
+class NotificationStatus(str, Enum):
+    """Status of a worker notification."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    INFO = "info"
+
+
+class Notification(BaseModel):
+    """A notification from a worker to the primary instance."""
+
+    id: str = Field(description="Unique notification ID (UUID)")
+    worker_id: str = Field(description="Instance ID of the sending worker")
+    worker_name: Optional[str] = Field(default=None, description="Name of the sending worker")
+    status: NotificationStatus = Field(description="Completion status")
+    message: Optional[str] = Field(default=None, description="Optional message content")
+    created_at: datetime = Field(default_factory=datetime.now)
+    delivered: bool = Field(default=False, description="Whether delivered to primary")
+    delivered_at: Optional[datetime] = Field(default=None)
+
+
 class InstanceMetadata(BaseModel):
     """Metadata for a managed Claude Code instance."""
 
