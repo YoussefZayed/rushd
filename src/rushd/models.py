@@ -67,6 +67,10 @@ class InstanceMetadata(BaseModel):
     display_mode: DisplayMode = Field(default=DisplayMode.ACTIVITY, description="Output display mode")
     auto_approve: bool = Field(default=True, description="Whether instance uses --dangerously-skip-permissions")
 
+    # New fields for auto-idle notifications
+    idle_since: Optional[datetime] = Field(default=None, description="Timestamp when instance first became idle")
+    auto_notified: bool = Field(default=False, description="Whether auto-notification was sent for current idle period")
+
     class Config:
         use_enum_values = True
 

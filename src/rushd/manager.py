@@ -296,11 +296,36 @@ class ClaudeInstanceManager:
                     "unknown": InstanceStatus.RUNNING,
                 }
                 new_status = status_map.get(activity.status, InstanceStatus.RUNNING)
-                self.store.update(
-                    instance.id,
-                    status=new_status,
-                    last_activity=datetime.now()
-                )
+
+                # Build updates dict
+                updates: dict = {
+                    "status": new_status,
+                    "last_activity": datetime.now(),
+                }
+
+                # Idle tracking for workers only (not primary)
+                is_worker = instance.name != "primary"
+                was_idle = instance.status == InstanceStatus.IDLE
+                is_now_idle = new_status == InstanceStatus.IDLE
+
+                if is_worker:
+                    if is_now_idle and not was_idle:
+                        # Newly idle: start tracking
+                        updates["idle_since"] = datetime.now()
+                        updates["auto_notified"] = False
+                    elif is_now_idle and was_idle:
+                        # Still idle: check for auto-notification
+                        if instance.idle_since and not instance.auto_notified:
+                            idle_seconds = (datetime.now() - instance.idle_since).total_seconds()
+                            if idle_seconds > 60:
+                                self._send_auto_idle_notification(instance)
+                                updates["auto_notified"] = True
+                    elif not is_now_idle:
+                        # No longer idle: reset tracking
+                        updates["idle_since"] = None
+                        updates["auto_notified"] = False
+
+                self.store.update(instance.id, **updates)
 
     def get_activity(self, identifier: str, last_n: int = 30) -> list[LogEntry]:
         """
@@ -433,6 +458,19 @@ class ClaudeInstanceManager:
             return True, notification.id
         else:
             return False, "Failed to send notification to primary"
+
+    def _send_auto_idle_notification(self, worker: InstanceMetadata) -> None:
+        """Send automatic notification when worker has been idle for too long."""
+        message = "[AUTO] Worker idle for 1+ min - task may be complete"
+        success, result = self.send_notification(
+            worker_identifier=worker.id,
+            status=NotificationStatus.INFO,
+            message=message,
+            primary_name="primary",
+        )
+        if success:
+            worker_display = worker.name or worker.id
+            print(f"[AutoNotify] Sent idle notification for worker '{worker_display}'")
 
     def list_notifications(
         self,
