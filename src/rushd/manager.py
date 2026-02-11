@@ -1,5 +1,6 @@
 """Main manager for Claude Code instances."""
 
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -8,8 +9,10 @@ from typing import Optional
 from .models import InstanceMetadata, InstanceStatus, DisplayMode, Notification, NotificationStatus
 from .notifications import NotificationStore
 from .store import InstanceStore
-from .tmux import TmuxController
+from .tmux import TmuxController, PANE_ID_PATTERN
 from .logs import ClaudeLogReader, LogEntry, format_activity, ActivityState
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeInstanceManager:
@@ -96,6 +99,23 @@ class ClaudeInstanceManager:
             command=command,
             working_dir=str(working_dir)
         )
+
+        # Validate pane_id before storing
+        if not pane_id or not PANE_ID_PATTERN.match(pane_id):
+            logger.warning(
+                f"Invalid pane_id '{pane_id}' for instance '{name or short_id}', "
+                f"attempting final fallback retrieval"
+            )
+            # One more attempt to get the pane ID
+            fallback_pane_id = self.tmux.get_pane_id_for_window(window_target)
+            if fallback_pane_id:
+                pane_id = fallback_pane_id
+                logger.info(f"Fallback pane_id succeeded: {pane_id}")
+            else:
+                logger.error(
+                    f"Could not determine pane_id for instance '{name or short_id}'. "
+                    f"Worker auto-detection may not work correctly."
+                )
 
         # Create and store metadata
         instance = InstanceMetadata(
@@ -317,7 +337,7 @@ class ClaudeInstanceManager:
                         # Still idle: check for auto-notification
                         if instance.idle_since and not instance.auto_notified:
                             idle_seconds = (datetime.now() - instance.idle_since).total_seconds()
-                            if idle_seconds > 60:
+                            if idle_seconds > 30:
                                 self._send_auto_idle_notification(instance)
                                 updates["auto_notified"] = True
                     elif not is_now_idle:
@@ -461,7 +481,7 @@ class ClaudeInstanceManager:
 
     def _send_auto_idle_notification(self, worker: InstanceMetadata) -> None:
         """Send automatic notification when worker has been idle for too long."""
-        message = "[AUTO] Worker idle for 1+ min - task may be complete"
+        message = "[AUTO] Worker idle for 30+ sec - task may be complete"
         success, result = self.send_notification(
             worker_identifier=worker.id,
             status=NotificationStatus.INFO,

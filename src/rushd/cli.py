@@ -466,64 +466,145 @@ class RushdCLI:
         console.print("[dim]Channels will be auto-created if needed[/dim]")
         run_discord_bot(self.manager, config.discord, self._config, primary_name, token)
 
-    def notify(
-        self,
-        status: str = "success",
-        message: Optional[str] = None,
-        worker: Optional[str] = None,
-        primary: Optional[str] = None,
-    ) -> None:
+    def responses(self, limit: int = 20, json: bool = False) -> None:
         """
-        Send a notification from a worker to the primary instance.
+        View Claude responses that were sent to Discord.
 
         Args:
-            status: Notification status: success, failure, or info (default: success)
-            message: Message content to send
-            worker: Worker instance ID or name (auto-detected from CWD if not specified)
-            primary: Primary instance name (defaults to config primary)
+            limit: Maximum number of responses to show (default: 20)
+            json: Output as JSON
         """
-        # Validate status
-        valid_statuses = ["success", "failure", "info"]
-        if status not in valid_statuses:
-            console.print(f"[red]Error:[/red] Invalid status '{status}'")
-            console.print(f"[dim]Valid values: {', '.join(valid_statuses)}[/dim]")
-            sys.exit(1)
+        import json as json_lib
 
-        notification_status = NotificationStatus(status)
+        responses_dir = Path.home() / ".rushd" / "responses"
+        if not responses_dir.exists():
+            console.print("[dim]No responses found. Run Discord bot to capture responses.[/dim]")
+            return
 
-        # Auto-detect worker from CWD if not specified
-        if worker is None:
-            cwd = Path.cwd()
-            inst = self.manager.find_instance_by_cwd(cwd)
-            if inst:
-                worker = inst.name or inst.id
-                console.print(f"[dim]Auto-detected worker: {worker}[/dim]")
+        # Read response files, sorted by timestamp (newest first)
+        files = sorted(responses_dir.glob("*.json"), reverse=True)[:limit]
+
+        responses_list = []
+        for f in files:
+            try:
+                data = json_lib.loads(f.read_text())
+                responses_list.append(data)
+            except Exception:
+                pass
+
+        if json:
+            console.print(json_lib.dumps(responses_list, indent=2))
+            return
+
+        if not responses_list:
+            console.print("[dim]No responses found[/dim]")
+            return
+
+        # Show oldest first for natural reading order
+        for resp in reversed(responses_list):
+            time_str = resp.get("timestamp", "")[:19]
+            text = resp.get("text", "")
+            console.print(f"[dim]{time_str}[/dim]")
+            console.print(text)
+            console.print()
+
+    def verify_panes(self, fix: bool = False, json: bool = False) -> None:
+        """
+        Verify stored pane IDs match actual tmux panes.
+
+        Cross-references instances.json pane IDs with actual tmux windows
+        and reports/fixes mismatches.
+
+        Args:
+            fix: Automatically fix mismatched pane IDs
+            json: Output as JSON
+        """
+        instances = self.manager.list_instances(include_stopped=False)
+        tmux_windows = self.manager.tmux.list_windows()
+
+        # Build lookup by window name
+        window_by_name: dict[str, dict] = {}
+        for w in tmux_windows:
+            window_by_name[w["name"]] = w
+
+        results = []
+        fixes_applied = 0
+
+        for inst in instances:
+            window_name = inst.name or inst.id
+            actual_window = window_by_name.get(window_name)
+
+            result = {
+                "instance_id": inst.id,
+                "name": inst.name,
+                "stored_pane_id": inst.tmux_pane_id,
+                "actual_pane_id": actual_window["pane_id"] if actual_window else None,
+                "window_exists": actual_window is not None,
+                "match": False,
+                "fixed": False,
+            }
+
+            if actual_window:
+                result["match"] = inst.tmux_pane_id == actual_window["pane_id"]
+
+                if not result["match"] and fix:
+                    # Update the stored pane ID
+                    self.manager.store.update(
+                        inst.id,
+                        tmux_pane_id=actual_window["pane_id"]
+                    )
+                    result["fixed"] = True
+                    fixes_applied += 1
+
+            results.append(result)
+
+        if json:
+            import json as json_lib
+            console.print(json_lib.dumps(results, indent=2))
+            return
+
+        # Display results as table
+        table = Table(title="Pane ID Verification")
+        table.add_column("Instance", style="cyan")
+        table.add_column("Stored Pane ID")
+        table.add_column("Actual Pane ID")
+        table.add_column("Status")
+
+        for r in results:
+            name = r["name"] or r["instance_id"]
+            stored = r["stored_pane_id"] or "[dim]-[/dim]"
+            actual = r["actual_pane_id"] or "[dim]-[/dim]"
+
+            if not r["window_exists"]:
+                status = "[red]window missing[/red]"
+            elif r["match"]:
+                status = "[green]OK[/green]"
+            elif r["fixed"]:
+                status = "[yellow]FIXED[/yellow]"
             else:
-                console.print("[red]Error:[/red] Could not auto-detect worker instance from current directory")
-                console.print("[dim]Specify --worker or run from a worker's working directory[/dim]")
-                sys.exit(1)
+                status = "[red]MISMATCH[/red]"
 
-        # Get primary name from config if not specified
-        if primary is None:
-            primary = self._config.get_primary().name
+            table.add_row(name, stored, actual, status)
 
-        # Send notification
-        success, result = self.manager.send_notification(
-            worker_identifier=worker,
-            status=notification_status,
-            message=message,
-            primary_name=primary,
-        )
+        console.print(table)
 
-        if success:
-            console.print(f"[green]Notification sent[/green]")
-            console.print(f"  ID: {result}")
-            console.print(f"  Status: {status}")
-            if message:
-                console.print(f"  Message: {message}")
+        # Summary
+        mismatches = sum(1 for r in results if not r["match"] and r["window_exists"])
+        missing = sum(1 for r in results if not r["window_exists"])
+
+        if mismatches > 0 or missing > 0:
+            console.print()
+            if mismatches > 0:
+                if fix:
+                    console.print(f"[green]Fixed {fixes_applied} mismatched pane ID(s)[/green]")
+                else:
+                    console.print(f"[yellow]{mismatches} mismatched pane ID(s) found[/yellow]")
+                    console.print("[dim]Run with --fix to update stored values[/dim]")
+            if missing > 0:
+                console.print(f"[yellow]{missing} instance(s) have no tmux window[/yellow]")
+                console.print("[dim]These instances may need to be removed[/dim]")
         else:
-            console.print(f"[red]Error:[/red] {result}")
-            sys.exit(1)
+            console.print("[green]All pane IDs verified correctly[/green]")
 
     def notifications(
         self,

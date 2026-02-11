@@ -1,9 +1,17 @@
 """Tmux controller for managing Claude Code instances in tmux windows."""
 
 import hashlib
+import logging
+import re
 import subprocess
 import time
 from typing import Optional
+
+
+# Regex pattern for valid tmux pane IDs (e.g., %5, %123)
+PANE_ID_PATTERN = re.compile(r"^%\d+$")
+
+logger = logging.getLogger(__name__)
 
 
 class TmuxController:
@@ -33,6 +41,26 @@ class TmuxController:
         _, code = self._run_tmux(["has-session", "-t", self.session_name])
         return code == 0
 
+    def _is_valid_pane_id(self, pane_id: str) -> bool:
+        r"""Check if a pane ID is valid (matches %\d+ pattern)."""
+        return bool(pane_id and PANE_ID_PATTERN.match(pane_id))
+
+    def get_pane_id_for_window(self, window_target: str) -> Optional[str]:
+        """
+        Query tmux directly for a window's pane ID.
+
+        This is used as a fallback when create_window output parsing fails.
+        """
+        output, code = self._run_tmux([
+            "list-panes", "-t", window_target, "-F", "#{pane_id}"
+        ])
+        if code == 0 and output:
+            # Take the first pane (windows typically have one pane)
+            pane_id = output.strip().split("\n")[0]
+            if self._is_valid_pane_id(pane_id):
+                return pane_id
+        return None
+
     def create_window(
         self,
         name: str,
@@ -55,12 +83,33 @@ class TmuxController:
         if code != 0:
             raise RuntimeError(f"Failed to create tmux window: {output}")
 
+        logger.debug(f"tmux new-window raw output: '{output}'")
+
         # Parse output like "1:%5"
         parts = output.split(":")
         window_index = parts[0] if parts else "0"
         pane_id = parts[1] if len(parts) > 1 else ""
 
         window_target = f"{self.session_name}:{window_index}"
+
+        # Validate pane_id format
+        if not self._is_valid_pane_id(pane_id):
+            logger.warning(
+                f"Invalid pane_id '{pane_id}' from tmux output '{output}', "
+                f"attempting fallback retrieval for {window_target}"
+            )
+            # Fallback: query tmux directly for the window's pane ID
+            fallback_pane_id = self.get_pane_id_for_window(window_target)
+            if fallback_pane_id:
+                logger.debug(f"Fallback pane_id retrieval succeeded: {fallback_pane_id}")
+                pane_id = fallback_pane_id
+            else:
+                logger.error(
+                    f"Failed to get valid pane_id for window {window_target}. "
+                    f"Original output: '{output}'"
+                )
+
+        logger.debug(f"Created window {window_target} with pane_id {pane_id}")
         return window_target, pane_id
 
     def list_windows(self) -> list[dict]:

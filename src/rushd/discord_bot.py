@@ -2,7 +2,9 @@
 
 import asyncio
 import hashlib
+import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -463,6 +465,9 @@ class RushdDiscordBot(discord.Client):
 
     async def send_to_responses(self, text: str):
         """Send Claude's response to responses channel."""
+        # Store response locally for CLI retrieval
+        self._store_response(text)
+
         if not self.config.channels.responses:
             print(f"[Send] No responses channel configured", flush=True)
             return
@@ -477,6 +482,25 @@ class RushdDiscordBot(discord.Client):
             print(f"[Send] Sent response to responses channel ({len(chunks)} chunks)", flush=True)
         except Exception as e:
             print(f"[Send] Error sending to responses: {e}", flush=True)
+
+    def _store_response(self, text: str) -> None:
+        """Store response locally for CLI retrieval via `rushd responses`."""
+        try:
+            responses_dir = Path.home() / ".rushd" / "responses"
+            responses_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().isoformat()
+            filename = f"{int(time.time() * 1000)}.json"
+
+            data = {
+                "timestamp": timestamp,
+                "text": text,
+                "primary": self.primary_name,
+            }
+
+            (responses_dir / filename).write_text(json.dumps(data))
+        except Exception as e:
+            print(f"[Store] Error storing response: {e}", flush=True)
 
     async def send_status_update(self, status: str, activity: ActivityState):
         """Send status change notification."""
