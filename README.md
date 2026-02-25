@@ -15,6 +15,7 @@
 - Send messages to instances without attaching to their terminals
 - View structured activity logs (thinking, tool use, responses) or raw terminal output
 - Interactive TUI for real-time monitoring and control
+- **Discord as a first-class interface** — slash commands, interactive buttons, multi-instance support
 - Auto-approve mode bypasses all permission prompts by default
 
 ---
@@ -345,7 +346,8 @@ rushd/
 ├── README.md               # This file
 └── src/rushd/
     ├── __init__.py
-    ├── cli.py              # CLI commands (fire-based)
+    ├── cli.py              # CLI commands (fire-based, thin wrapper)
+    ├── commands.py          # Shared command handlers (used by CLI + Discord)
     ├── tui.py              # Interactive TUI (textual-based)
     ├── manager.py          # ClaudeInstanceManager - main orchestration
     ├── models.py           # Pydantic data models
@@ -353,7 +355,20 @@ rushd/
     ├── config.py           # Configuration management (~/.rushd/config.json)
     ├── tmux.py             # TmuxController - tmux subprocess wrapper
     ├── logs.py             # ClaudeLogReader - parse Claude Code logs
-    └── discord_bot.py      # Discord bot integration
+    ├── notifications.py    # Worker-to-primary notification storage
+    ├── discord_bot.py      # Backward-compat shim (imports from discord/)
+    └── discord/            # Discord bot package
+        ├── __init__.py
+        ├── bot.py          # RushdBot - commands.Bot with slash commands
+        ├── routing.py      # Channel-to-instance routing
+        ├── embeds.py       # Rich embed builders
+        ├── views.py        # Interactive components (buttons, modals)
+        ├── utils.py        # Shared utilities (truncate, split, hash)
+        ├── watcher.py      # Filesystem watcher for log changes
+        └── cogs/
+            ├── instances.py  # /start, /stop, /list, /status, /remove
+            ├── messaging.py  # /send, /clear, /approve
+            └── approvals.py  # Persistent view registration
 ```
 
 ### How It Works
@@ -367,18 +382,21 @@ rushd/
    - Status (starting, running, idle, stopped, error)
    - Claude session ID (for log correlation)
 
-3. **Message Flow**:
+3. **Shared Command Layer**: The `CommandHandler` class in `commands.py` encapsulates all business logic. Both the CLI and Discord bot call the same handlers, returning structured `CommandResult` objects. The CLI formats results for the terminal (via Rich), while Discord formats them as embeds.
+
+4. **Message Flow**:
    ```
-   User input → rushd CLI/TUI → manager.send_message() → tmux send-keys → Claude Code
+   CLI:     User input → CLI → CommandHandler → manager → tmux send-keys → Claude
+   Discord: Discord msg → Bot → CommandHandler → manager → tmux send-keys → Claude
    ```
 
-4. **Log Reading**: Claude Code stores conversation logs at:
+5. **Log Reading**: Claude Code stores conversation logs at:
    ```
    ~/.claude/projects/-{encoded-path}/SESSION_ID.jsonl
    ```
    Where path `/home/admin/project` becomes `-home-admin-project`.
 
-5. **Activity Display**: The log reader parses JSONL entries and extracts:
+6. **Activity Display**: The log reader parses JSONL entries and extracts:
    - User messages
    - Assistant thinking blocks
    - Tool use (name, inputs)
@@ -542,13 +560,14 @@ uv tool install -e . --force
 - **[pydantic](https://docs.pydantic.dev/)** - Data validation and serialization
 - **[rich](https://rich.readthedocs.io/)** - Terminal formatting and tables
 - **[textual](https://textual.textualize.io/)** - TUI framework
-- **[discord.py](https://discordpy.readthedocs.io/)** - Discord bot framework
+- **[discord.py](https://discordpy.readthedocs.io/)** - Discord bot framework (slash commands, views)
+- **[watchdog](https://python-watchdog.readthedocs.io/)** - Filesystem monitoring for log changes
 
 ---
 
 ## Discord Integration
 
-rushd can bridge your primary instance with Discord, allowing you to monitor Claude's activity and send commands from Discord.
+Discord is a first-class interface for rushd. You can manage all your Claude Code instances entirely from Discord using slash commands, interactive buttons, and per-instance channels — no terminal needed.
 
 ### Setup
 
@@ -559,8 +578,8 @@ rushd can bridge your primary instance with Discord, allowing you to monitor Cla
 
 2. **Invite the bot** to your server:
    - OAuth2 → URL Generator
-   - Scopes: `bot`
-   - Permissions: `Manage Channels`, `Send Messages`, `Read Message History`, `View Channels`, `Add Reactions`
+   - Scopes: `bot`, `applications.commands`
+   - Permissions: `Manage Channels`, `Send Messages`, `Read Message History`, `View Channels`, `Add Reactions`, `Use Slash Commands`
    - Use the generated URL to add bot to your server
 
 3. **Configure rushd** (`~/.rushd/config.json`):
@@ -575,7 +594,7 @@ rushd can bridge your primary instance with Discord, allowing you to monitor Cla
    }
    ```
 
-4. **Set the token** (add to `~/.bashrc`):
+4. **Set the token** (add to `~/.bashrc` or environment):
    ```bash
    export RUSHD_DISCORD_TOKEN="your-bot-token"
    ```
@@ -585,25 +604,101 @@ rushd can bridge your primary instance with Discord, allowing you to monitor Cla
    rushd discord
    ```
 
+Slash commands are synced to your server on startup and available immediately.
+
 ### Discord Channels
 
-The bot automatically creates a category and channels using the primary instance name:
+The bot automatically creates a category and channels for each instance:
 
 | Channel | Purpose |
 |---------|---------|
-| `#primary-activity` | Full activity stream (thinking, tools, results) |
-| `#primary-responses` | Claude's text responses only |
-| `#primary-status` | Status notifications (thinking, idle, working) |
-| `#primary-commands` | Send commands to Claude here |
+| `#<instance>-activity` | Full activity stream (thinking, tools, results) |
+| `#<instance>-responses` | Claude's text responses only |
+| `#<instance>-status` | Status change notifications (with embeds) |
+| `#<instance>-commands` | Send messages to Claude here |
+| `#<instance>-live-view` | Auto-updating message with recent activity |
 
-### Discord Commands
+For the primary instance, channels are named `#primary-activity`, `#primary-commands`, etc. When you start additional instances via `/start`, they each get their own category and channel set automatically.
 
-| Command | Description |
-|---------|-------------|
-| Any message | Sent to Claude as input |
-| `/clear` | Destroy and recreate the primary instance |
+### Slash Commands
 
-Messages can be sent from both `#primary-commands` and `#primary-responses` channels.
+Type `/` in any channel to see all available commands:
+
+| Command | Parameters | Description |
+|---------|-----------|-------------|
+| `/start` | `name?`, `directory?`, `model?`, `prompt?` | Start a new Claude Code instance |
+| `/stop` | `instance` | Stop a running instance |
+| `/list` | `all?` | List all instances (rich embed) |
+| `/status` | `instance?` | Detailed status of an instance |
+| `/send` | `instance`, `message` | Send a message to an instance |
+| `/clear` | `instance?` | Destroy and recreate an instance |
+| `/remove` | `instance` | Remove a stopped instance from storage |
+| `/cleanup` | | Stop all instances and clean up |
+| `/approve` | `instance?` | Approve a pending plan |
+
+All `instance` parameters support **autocomplete** — start typing and it shows running instances with their current status.
+
+When `instance` is optional and not provided, it defaults to the instance mapped to the current channel (or primary).
+
+### Plain Text Messaging
+
+You can also type plain text in `#<instance>-commands` or `#<instance>-responses` channels to send messages directly to Claude. This works the same as before — no slash command needed.
+
+Attachments (screenshots, images) are automatically downloaded and forwarded to Claude for analysis.
+
+### Interactive Plan Approval
+
+When Claude finishes planning and calls `ExitPlanMode`, Discord shows an interactive message with three buttons:
+
+- **Approve** (green) — approves the plan and starts implementation
+- **Reject** (red) — rejects the plan
+- **Modify...** (blue) — opens a text modal where you type feedback for Claude to revise the plan
+
+Plain text approval still works as a fallback — type `yes`, `approve`, `lgtm`, etc.
+
+### Interactive Question Answering
+
+When Claude asks a question via `AskUserQuestion`, Discord shows clickable buttons for each option. Click a button to send your answer, or type your response as plain text.
+
+### Multi-Instance Support
+
+Each instance gets its own Discord category with isolated channels:
+
+```
+primary/
+  #primary-activity
+  #primary-responses
+  #primary-status
+  #primary-commands
+  #primary-live-view
+
+worker-1/
+  #worker-1-activity
+  #worker-1-responses
+  #worker-1-status
+  #worker-1-commands
+  #worker-1-live-view
+```
+
+Messages typed in `#worker-1-commands` are routed to the `worker-1` instance. Each instance has its own independent monitoring loop.
+
+To create a new instance with its own channels:
+```
+/start name:worker-1 directory:/home/admin/my-project
+```
+
+### Activity Monitoring
+
+The bot monitors each running instance and dispatches activity to the appropriate channels:
+
+- **Thinking** → `#<instance>-activity` (code block)
+- **Tool use** → `#<instance>-activity` (tool name + input)
+- **Tool results** → `#<instance>-activity` (code block)
+- **Text responses** → both `#<instance>-activity` and `#<instance>-responses`
+- **Status changes** → `#<instance>-status` (rich embeds with color coding)
+
+Status embeds use color coding:
+- 🟢 Running | 🔵 Thinking | 🟣 Tool Use | ⚪ Idle | 🔴 Stopped | 🟡 Starting
 
 ### Running as a Service
 
@@ -641,6 +736,7 @@ sudo systemctl start rushd-discord
 
 ## Version History
 
+- **v0.5.0** - Discord-first interface: slash commands, interactive plan approval buttons, multi-instance channel routing, rich embeds, shared command handler layer, filesystem watcher
 - **v0.4.0** - Added Discord bot integration with multi-channel support, /clear command
 - **v0.3.0** - Added primary instance support, user configuration (~/.rushd/config.json), commands default to primary instance
 - **v0.2.0** - Added conversation log integration, structured activity display, auto-approve mode, display mode toggle

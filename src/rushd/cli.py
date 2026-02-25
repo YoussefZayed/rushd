@@ -8,6 +8,7 @@ import fire
 from rich.console import Console
 from rich.table import Table
 
+from .commands import CommandHandler
 from .config import ConfigManager
 from .manager import ClaudeInstanceManager
 from .models import InstanceStatus, NotificationStatus
@@ -30,6 +31,7 @@ class RushdCLI:
         config = self._config.load()
         self._session = session or config.defaults.session_name
         self._manager: Optional[ClaudeInstanceManager] = None
+        self._cmd: Optional[CommandHandler] = None
 
     @property
     def manager(self) -> ClaudeInstanceManager:
@@ -37,6 +39,13 @@ class RushdCLI:
         if self._manager is None:
             self._manager = ClaudeInstanceManager(self._session)
         return self._manager
+
+    @property
+    def cmd(self) -> CommandHandler:
+        """Lazy-load the command handler."""
+        if self._cmd is None:
+            self._cmd = CommandHandler(self.manager, self._config)
+        return self._cmd
 
     def start(
         self,
@@ -58,36 +67,28 @@ class RushdCLI:
             resume: Session ID to resume
             interactive: If True, don't auto-approve prompts (manual control)
         """
-        # If no name or dir specified, use primary config
+        # Resolve defaults for display
         if name is None and dir is None:
             primary = self._config.get_primary()
-            name = primary.name
-            dir = str(primary.working_dir)
-            model = model or primary.model
-            if not interactive:
-                interactive = not primary.auto_approve
             console.print(f"[dim]Using primary instance defaults[/dim]")
+            auto_approve = not interactive if not interactive else not primary.auto_approve
+            # Let CommandHandler resolve the defaults
+            working_dir = None
+        else:
+            working_dir = Path(dir).expanduser().resolve() if dir else None
+            auto_approve = not interactive
 
-        working_dir = Path(dir).expanduser().resolve() if dir else None
+        result = self.cmd.start_instance(
+            name=name,
+            working_dir=working_dir,
+            model=model,
+            prompt=prompt,
+            resume=resume,
+            auto_approve=auto_approve,
+        )
 
-        # Validate working directory exists
-        if working_dir and not working_dir.exists():
-            console.print(f"[red]Error:[/red] Working directory does not exist: {working_dir}")
-            console.print("[dim]Create the directory or update ~/.rushd/config.json[/dim]")
-            sys.exit(1)
-
-        # auto_approve is True by default, but False if --interactive is passed
-        auto_approve = not interactive
-
-        try:
-            instance = self.manager.start_instance(
-                name=name,
-                working_dir=working_dir,
-                model=model,
-                initial_prompt=prompt,
-                resume=resume,
-                auto_approve=auto_approve,
-            )
+        if result.success:
+            instance = result.data
             display_name = instance.name or instance.id
             console.print(f"[green]Started instance:[/green] {display_name}")
             console.print(f"  ID: {instance.id}")
@@ -97,8 +98,8 @@ class RushdCLI:
                 console.print(f"  [dim]Auto-approve: enabled (--dangerously-skip-permissions)[/dim]")
             else:
                 console.print(f"  [yellow]Auto-approve: disabled (interactive mode)[/yellow]")
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}")
+        else:
+            console.print(f"[red]Error:[/red] {result.message}")
             sys.exit(1)
 
     def list(self, all: bool = False, json: bool = False) -> None:
@@ -109,9 +110,8 @@ class RushdCLI:
             all: Include stopped instances
             json: Output as JSON
         """
-        # Refresh statuses to detect activity state
-        self.manager.refresh_statuses()
-        instances = self.manager.list_instances(include_stopped=all)
+        result = self.cmd.list_instances(include_stopped=all)
+        instances = result.data
 
         if json:
             import json as json_lib
@@ -141,7 +141,6 @@ class RushdCLI:
         table.add_column("Directory")
 
         for i, inst in enumerate(instances, 1):
-            # Enhanced status display with activity indicators
             status_display = {
                 InstanceStatus.RUNNING: "[green]running[/green]",
                 InstanceStatus.STARTING: "[yellow]starting...[/yellow]",
@@ -172,18 +171,19 @@ class RushdCLI:
             force: Force kill without graceful shutdown
         """
         if all:
-            count = self.manager.stop_all(force=force)
-            console.print(f"[green]Stopped {count} instance(s)[/green]")
+            result = self.cmd.stop_all(force=force)
+            console.print(f"[green]{result.message}[/green]")
             return
 
         if not instance:
             console.print("[red]Error:[/red] Specify an instance or use --all")
             sys.exit(1)
 
-        if self.manager.stop_instance(instance, force=force):
+        result = self.cmd.stop_instance(instance, force=force)
+        if result.success:
             console.print(f"[green]Stopped:[/green] {instance}")
         else:
-            console.print(f"[red]Error:[/red] Instance not found: {instance}")
+            console.print(f"[red]Error:[/red] {result.message}")
             sys.exit(1)
 
     def view(self, instance: Optional[str] = None, lines: int = 50, follow: bool = False, activity: bool = False) -> None:
@@ -196,10 +196,8 @@ class RushdCLI:
             follow: Follow output
             activity: Show structured activity from logs instead of raw terminal
         """
-        # Default to primary instance
         if instance is None:
-            primary = self._config.get_primary()
-            instance = primary.name
+            instance = self._config.get_primary().name
 
         inst = self.manager.get_instance(instance)
         if not inst:
@@ -217,7 +215,6 @@ class RushdCLI:
                     else:
                         output = self.manager.capture_output(instance, lines=lines)
                     if output != last_output:
-                        # Clear and reprint
                         console.clear()
                         console.print(output)
                         last_output = output
@@ -244,41 +241,29 @@ class RushdCLI:
 
         # Smart detection: if first arg provided but no message, check if it's an instance or message
         if instance is not None and not message and not file:
-            # Check if it's actually an instance
             inst = self.manager.get_instance(instance)
             if inst is None:
-                # Not an instance - treat it as message to primary
                 message = instance
-                primary = self._config.get_primary()
-                instance = primary.name
+                instance = self._config.get_primary().name
 
-        # Default to primary instance if no instance specified
         if instance is None:
-            primary = self._config.get_primary()
-            instance = primary.name
-
-        # Verify instance exists
-        inst = self.manager.get_instance(instance)
-        if not inst:
-            console.print(f"[yellow]Instance '{instance}' not found.[/yellow]")
-            console.print("[dim]Start it with 'rushd start'[/dim]")
-            sys.exit(1)
+            instance = self._config.get_primary().name
 
         if file:
             with open(file, "r") as f:
                 message = f.read()
 
-        # Convert message to string (fire may pass int for numeric input)
         message = str(message)
 
         if not message:
             console.print("[red]Error:[/red] No message provided")
             sys.exit(1)
 
-        if self.manager.send_message(instance, message):
+        result = self.cmd.send_message(instance, message)
+        if result.success:
             console.print("[green]Message sent[/green]")
         else:
-            console.print(f"[red]Error:[/red] Failed to send to: {instance}")
+            console.print(f"[red]Error:[/red] {result.message}")
             sys.exit(1)
 
     def attach(self, instance: Optional[str] = None) -> None:
@@ -288,10 +273,8 @@ class RushdCLI:
         Args:
             instance: Instance ID or name (defaults to primary)
         """
-        # Default to primary instance
         if instance is None:
-            primary = self._config.get_primary()
-            instance = primary.name
+            instance = self._config.get_primary().name
 
         inst = self.manager.get_instance(instance)
         if not inst:
@@ -311,10 +294,8 @@ class RushdCLI:
         """
         from .logs import ClaudeLogReader
 
-        # Default to primary instance
         if instance is None:
-            primary = self._config.get_primary()
-            instance = primary.name
+            instance = self._config.get_primary().name
 
         inst = self.manager.get_instance(instance)
         if not inst:
@@ -338,17 +319,13 @@ class RushdCLI:
         Args:
             instance: Instance ID or name (defaults to primary)
         """
-        # Default to primary instance
-        if instance is None:
-            primary = self._config.get_primary()
-            instance = primary.name
-
-        inst = self.manager.get_instance(instance)
-        if not inst:
-            console.print(f"[red]Error:[/red] Instance not found: {instance}")
+        result = self.cmd.get_status(instance)
+        if not result.success:
+            console.print(f"[red]Error:[/red] {result.message}")
             console.print("[dim]Start it with 'rushd start'[/dim]")
             sys.exit(1)
 
+        inst = result.data
         console.print(f"[bold]Instance: {inst.name or inst.id}[/bold]")
         console.print(f"  ID: {inst.id}")
         console.print(f"  Full ID: {inst.full_id}")
@@ -372,21 +349,11 @@ class RushdCLI:
         Args:
             instance: Instance ID or name to remove
         """
-        inst = self.manager.get_instance(instance)
-        if not inst:
-            console.print(f"[red]Error:[/red] Instance not found: {instance}")
-            sys.exit(1)
-
-        if inst.status != InstanceStatus.STOPPED:
-            # Check if tmux window still exists
-            if self.manager.tmux.window_exists(inst.tmux_window):
-                console.print(f"[red]Error:[/red] Instance is still running. Stop it first with 'rushd stop {instance}'")
-                sys.exit(1)
-
-        if self.manager.remove_instance(instance):
+        result = self.cmd.remove_instance(instance)
+        if result.success:
             console.print(f"[green]Removed:[/green] {instance}")
         else:
-            console.print(f"[red]Error:[/red] Failed to remove: {instance}")
+            console.print(f"[red]Error:[/red] {result.message}")
             sys.exit(1)
 
     def cleanup(self, force: bool = False) -> None:
@@ -405,8 +372,8 @@ class RushdCLI:
                     console.print("Cancelled")
                     return
 
-        self.manager.cleanup(force=True)
-        console.print("[green]Cleanup complete[/green]")
+        result = self.cmd.cleanup(force=True)
+        console.print(f"[green]{result.message}[/green]")
 
     def config(self, show: bool = False, init: bool = False) -> None:
         """
@@ -427,7 +394,6 @@ class RushdCLI:
             console.print("[green]Created config file at ~/.rushd/config.json[/green]")
             return
 
-        # Default to showing config
         config = self._config.load()
         import json as json_lib
         console.print(json_lib.dumps(config.model_dump(mode="json"), indent=2, default=str))
@@ -461,7 +427,7 @@ class RushdCLI:
             console.print("[yellow]Warning:[/yellow] Primary instance not running")
             console.print("[dim]Start it with 'rushd start'[/dim]")
 
-        from .discord_bot import run_discord_bot
+        from .discord import run_discord_bot
         console.print(f"[green]Starting Discord bot for '{primary_name}'...[/green]")
         console.print("[dim]Channels will be auto-created if needed[/dim]")
         run_discord_bot(self.manager, config.discord, self._config, primary_name, token)
@@ -481,7 +447,6 @@ class RushdCLI:
             console.print("[dim]No responses found. Run Discord bot to capture responses.[/dim]")
             return
 
-        # Read response files, sorted by timestamp (newest first)
         files = sorted(responses_dir.glob("*.json"), reverse=True)[:limit]
 
         responses_list = []
@@ -500,7 +465,6 @@ class RushdCLI:
             console.print("[dim]No responses found[/dim]")
             return
 
-        # Show oldest first for natural reading order
         for resp in reversed(responses_list):
             time_str = resp.get("timestamp", "")[:19]
             text = resp.get("text", "")
@@ -512,9 +476,6 @@ class RushdCLI:
         """
         Verify stored pane IDs match actual tmux panes.
 
-        Cross-references instances.json pane IDs with actual tmux windows
-        and reports/fixes mismatches.
-
         Args:
             fix: Automatically fix mismatched pane IDs
             json: Output as JSON
@@ -522,7 +483,6 @@ class RushdCLI:
         instances = self.manager.list_instances(include_stopped=False)
         tmux_windows = self.manager.tmux.list_windows()
 
-        # Build lookup by window name
         window_by_name: dict[str, dict] = {}
         for w in tmux_windows:
             window_by_name[w["name"]] = w
@@ -548,7 +508,6 @@ class RushdCLI:
                 result["match"] = inst.tmux_pane_id == actual_window["pane_id"]
 
                 if not result["match"] and fix:
-                    # Update the stored pane ID
                     self.manager.store.update(
                         inst.id,
                         tmux_pane_id=actual_window["pane_id"]
@@ -563,7 +522,6 @@ class RushdCLI:
             console.print(json_lib.dumps(results, indent=2))
             return
 
-        # Display results as table
         table = Table(title="Pane ID Verification")
         table.add_column("Instance", style="cyan")
         table.add_column("Stored Pane ID")
@@ -588,7 +546,6 @@ class RushdCLI:
 
         console.print(table)
 
-        # Summary
         mismatches = sum(1 for r in results if not r["match"] and r["window_exists"])
         missing = sum(1 for r in results if not r["window_exists"])
 
@@ -658,17 +615,14 @@ class RushdCLI:
         table.add_column("Delivered", style="dim")
 
         for n in notifications_list:
-            # Format time
             time_str = n.created_at.strftime("%Y-%m-%d %H:%M:%S") if n.created_at else "-"
 
-            # Status with color
             status_display = {
                 "success": "[green]success[/green]",
                 "failure": "[red]failure[/red]",
                 "info": "[blue]info[/blue]",
             }.get(n.status, n.status)
 
-            # Delivered indicator
             delivered_str = "[green]Yes[/green]" if n.delivered else "[yellow]No[/yellow]"
 
             table.add_row(
@@ -692,7 +646,6 @@ def main():
 
         # Handle attach request
         if result == "attach":
-            # Get the selected instance and attach
             manager = ClaudeInstanceManager()
             instances = manager.list_instances()
             if instances:
